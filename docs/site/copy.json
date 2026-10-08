@@ -1,5 +1,5 @@
 {
-  "version": "1.0",
+  "version": "1.0.1",
   "language": "ru",
   "name": "System Rich",
   "canonical": "https://system.rich/",
@@ -45,7 +45,7 @@
     "publicName": "Марк Малина",
     "text": "Создаю систему для реальной жизни: чтобы личный учёт и взаимодействие людей начинались с понятных правил и данных под контролем их владельцев.",
     "telegram": "https://t.me/MarkMayak",
-    "instagram": "https://www.instagram.com/markmayak.today/",
-    "contactStatus": "Previously confirmed public accounts; exact new Mark Malina URLs await owner clarification."
+    "instagram": "https://www.instagram.com/mark.malina/",
+    "contactStatus": "Instagram @mark.malina explicitly supplied by owner on 2026-10-08; Telegram remains the prior confirmed @MarkMayak."
   }
 }
