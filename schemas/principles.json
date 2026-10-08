@@ -1,0 +1,25 @@
+{
+  "version": "0.3",
+  "sheet_name": "Принципы",
+  "table_name": "PersonalPrinciples",
+  "unit": "personal_principle",
+  "columns": [
+    {
+      "index": 0,
+      "key": "principle_text",
+      "title": "Принципы",
+      "type": "text",
+      "required": true
+    },
+    {
+      "index": 1,
+      "key": "owner",
+      "title": "Владелец",
+      "type": "text",
+      "required": true
+    }
+  ],
+  "literal_text": true,
+  "application": "Only to the named owner's accounting and the principle's explicit scope; missing details do not block raw intake.",
+  "write_policy": "Explicit instruction by the owner or authorized representative; ordinary Work only reads."
+}

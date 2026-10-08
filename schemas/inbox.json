@@ -1,5 +1,5 @@
 {
-  "version": "0.2",
+  "version": "0.3",
   "sheet_name": "Входящие",
   "table_name": "InboxRawData",
   "unit": "source_part",
@@ -115,6 +115,27 @@
       "title": "Версия схемы",
       "type": "text",
       "required": true
+    },
+    {
+      "index": 16,
+      "key": "author",
+      "title": "Автор",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 17,
+      "key": "provided_by",
+      "title": "Предоставил",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 18,
+      "key": "owners",
+      "title": "Владелец",
+      "type": "text",
+      "required": false
     }
   ],
   "content_requirement": "raw_text or an attachment reference",
@@ -130,5 +151,16 @@
   ],
   "timezone": "UTC+03:00",
   "batch_completion": "One consistent declared total N; exactly one part for every index 1..N; all parts read back before processing.",
-  "literal_text": true
+  "literal_text": true,
+  "provenance_roles": {
+    "author": "Author of the original message or document, when known. Distinguish authors of different sources in one part; Work transcription is not original authorship.",
+    "provided_by": "Person or agent who supplied this part to the system. Does not imply resource ownership.",
+    "source": "Channel, document and acquisition chain; preserve original provenance.",
+    "owners": "Resource-specific owner assertions. For multiple resources use a JSON list with resource, owner and basis; add event/time/scope when applicable. Unknown owners stay unknown. Storage, payment, receipt or compensation does not by itself prove ownership."
+  },
+  "compatibility": {
+    "previous_version": "0.2",
+    "prefix_columns_unchanged": 16,
+    "legacy_rows": "Keep original row schema_version and all existing values; new provenance columns may be blank. Missing metadata does not invalidate raw input."
+  }
 }
