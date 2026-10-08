@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private principle feedback",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_ids",
+    "owner",
+    "principle",
+    "kind",
+    "description",
+    "correction_request",
+    "delivery_state"
+  ],
+  "properties": {
+    "record_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1
+    },
+    "principle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "text",
+        "range"
+      ],
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Ordinal among this owner's nonempty principles at check time; not a stable ID."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "range": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Private source sheet and exact row; never publish its actual value."
+        }
+      }
+    },
+    "kind": {
+      "enum": [
+        "missing_detail",
+        "conflicting_value",
+        "ambiguous_rule"
+      ]
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "correction_request": {
+      "type": "string",
+      "minLength": 1
+    },
+    "origin_work": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Known receiving Work; unknown remains null or omitted."
+    },
+    "delivery_state": {
+      "enum": [
+        "Подготовлено к передаче",
+        "Доставлено",
+        "Получено",
+        "Разрешено"
+      ]
+    },
+    "delivery_evidence": {
+      "type": "string",
+      "minLength": 1
+    },
+    "resolution_evidence": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "delivery_state": {
+            "enum": [
+              "Доставлено",
+              "Получено",
+              "Разрешено"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "delivery_evidence"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "delivery_state": {
+            "const": "Разрешено"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "resolution_evidence"
+        ]
+      }
+    }
+  ]
+}
