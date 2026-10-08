@@ -1,0 +1,134 @@
+{
+  "version": "0.2",
+  "sheet_name": "Входящие",
+  "table_name": "InboxRawData",
+  "unit": "source_part",
+  "columns": [
+    {
+      "index": 0,
+      "key": "record_id",
+      "title": "ID записи",
+      "type": "text",
+      "required": true
+    },
+    {
+      "index": 1,
+      "key": "raw_text",
+      "title": "Исходный текст",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 2,
+      "key": "attachments",
+      "title": "Вложения",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 3,
+      "key": "source",
+      "title": "Источник",
+      "type": "text",
+      "required": true
+    },
+    {
+      "index": 4,
+      "key": "received_at",
+      "title": "Получено (МСК)",
+      "type": "datetime",
+      "required": true
+    },
+    {
+      "index": 5,
+      "key": "event_at",
+      "title": "Дата события / документа (МСК)",
+      "type": "datetime",
+      "required": false
+    },
+    {
+      "index": 6,
+      "key": "context",
+      "title": "Контекст",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 7,
+      "key": "relates_to",
+      "title": "Связь с записью",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 8,
+      "key": "batch_id",
+      "title": "ID пакета",
+      "type": "text",
+      "required": true
+    },
+    {
+      "index": 9,
+      "key": "part_index",
+      "title": "Часть пакета",
+      "type": "positive_integer",
+      "required": true
+    },
+    {
+      "index": 10,
+      "key": "part_count",
+      "title": "Всего частей",
+      "type": "positive_integer",
+      "required": false
+    },
+    {
+      "index": 11,
+      "key": "provided_fields",
+      "title": "Дополнительные сведения",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 12,
+      "key": "processing_state",
+      "title": "Статус обработки",
+      "type": "state",
+      "required": true
+    },
+    {
+      "index": 13,
+      "key": "processing_result",
+      "title": "Результат обработки",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 14,
+      "key": "recorded_at",
+      "title": "Записано (МСК)",
+      "type": "datetime",
+      "required": true
+    },
+    {
+      "index": 15,
+      "key": "schema_version",
+      "title": "Версия схемы",
+      "type": "text",
+      "required": true
+    }
+  ],
+  "content_requirement": "raw_text or an attachment reference",
+  "initial_state": "Получено",
+  "states": [
+    "Получено",
+    "Ожидает частей",
+    "Обрабатывается",
+    "Ожидает уточнения",
+    "Частично обработано",
+    "Обработано",
+    "Ошибка обработки"
+  ],
+  "timezone": "UTC+03:00",
+  "batch_completion": "One consistent declared total N; exactly one part for every index 1..N; all parts read back before processing.",
+  "literal_text": true
+}
