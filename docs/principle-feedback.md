@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 System Rich contributors -->
+<!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
+
 # Обратная связь о конфликтах с личными принципами
 
 Версия протокола: **0.3.1**. Формат частного замечания: [schemas/principle-feedback.json](../schemas/principle-feedback.json).

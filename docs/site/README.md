@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 System Rich contributors -->
+<!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
+
 # Сайт System Rich
 
 Решение владельца от 8 октября 2026: опубликовать базовую страницу на `https://system.rich/` через Vercel.

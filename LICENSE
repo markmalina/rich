@@ -1,0 +1,29 @@
+System Rich — license notice
+
+The licenses below apply to different materials, not as alternative licenses
+for the same file. The repository owner approved this licensing model on
+2026-10-09.
+
+Software, executable components, and the machine-readable interface sources
+under schemas/ are licensed under GNU Affero General Public License,
+version 3 only (SPDX: AGPL-3.0-only).
+Full text: LICENSES/AGPL-3.0-only.txt
+
+Standalone protocol documentation, non-executable prompts, textual templates,
+project policies, and site copy are licensed under Creative Commons
+Attribution-ShareAlike 4.0 International (SPDX: CC-BY-SA-4.0).
+Full text: LICENSES/CC-BY-SA-4.0.txt
+
+See LICENSING.json for the exact current file map and docs/licensing/README.md
+for attribution, future-file rules, integration guidance, and scope.
+Per-file SPDX notices and .license sidecars identify covered materials.
+Third-party material keeps its original license and notices.
+
+Copyright (c) 2026 respective System Rich contributors, where copyright exists.
+Keep existing authorship and copyright notices. Git history records contributions.
+Project attribution: System Rich — https://github.com/markmalina/rich
+
+No license to private user records, personal documents, credentials, or
+user-owned database contents is granted by this repository notice.
+These licenses do not grant trademark rights.
+The license texts themselves retain their publishers' notices and terms.

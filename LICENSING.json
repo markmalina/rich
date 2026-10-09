@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "project": "System Rich",
+  "repository": "https://github.com/markmalina/rich",
+  "effective_date": "2026-10-09",
+  "copyright_notice": "2026 respective System Rich contributors, where copyright exists; preserve individual notices",
+  "files": {
+    "AGENTS.md": "CC-BY-SA-4.0",
+    "README.md": "CC-BY-SA-4.0",
+    "docs/inbox.md": "CC-BY-SA-4.0",
+    "docs/licensing/recommendation-2026-10-09.md": "CC-BY-SA-4.0",
+    "docs/principle-feedback.md": "CC-BY-SA-4.0",
+    "docs/principles.md": "CC-BY-SA-4.0",
+    "docs/proposals/distributed-exchange.md": "CC-BY-SA-4.0",
+    "docs/site/README.md": "CC-BY-SA-4.0",
+    "docs/site/copy.json": "CC-BY-SA-4.0",
+    "schemas/inbox.json": "AGPL-3.0-only",
+    "schemas/principle-feedback.json": "AGPL-3.0-only",
+    "schemas/principles.json": "AGPL-3.0-only",
+    "CONTRIBUTING.md": "CC-BY-SA-4.0",
+    "BRAND_POLICY.md": "CC-BY-SA-4.0",
+    "docs/licensing/README.md": "CC-BY-SA-4.0",
+    ".github/PULL_REQUEST_TEMPLATE.md": "CC-BY-SA-4.0",
+    "LICENSE": "CC-BY-SA-4.0",
+    "LICENSING.json": "CC-BY-SA-4.0",
+    "schemas/inbox.json.license": "AGPL-3.0-only",
+    "schemas/principles.json.license": "AGPL-3.0-only",
+    "schemas/principle-feedback.json.license": "AGPL-3.0-only",
+    "docs/site/copy.json.license": "CC-BY-SA-4.0",
+    "LICENSING.json.license": "CC-BY-SA-4.0"
+  },
+  "license_texts": {
+    "AGPL-3.0-only": "LICENSES/AGPL-3.0-only.txt",
+    "CC-BY-SA-4.0": "LICENSES/CC-BY-SA-4.0.txt"
+  },
+  "license_text_scope": "License texts retain their publishers' notices and copying conditions; do not relicense or edit them.",
+  "private_data": "Not included in the license grant for public project materials.",
+  "future_files": "Explicit per-file SPDX marking and a manifest entry required; see docs/licensing/README.md.",
+  "license_text_sources": {
+    "AGPL-3.0-only": {
+      "repository": "spdx/license-list-data",
+      "path": "text/AGPL-3.0-only.txt",
+      "git_blob_sha": "0c97efd25b5974b974ed9a8a18207bc4f55bb338"
+    },
+    "CC-BY-SA-4.0": {
+      "repository": "spdx/license-list-data",
+      "path": "text/CC-BY-SA-4.0.txt",
+      "git_blob_sha": "835a6836b385fa068fdd625685548845cda60c2f"
+    }
+  }
+}

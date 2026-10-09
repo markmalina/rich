@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 System Rich contributors -->
+<!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
+
 # Личные принципы
 
 Версия протокола: **0.3.1**. Версия структуры листа: **0.3**. Точное имя листа: **Принципы**. Таблица: **PersonalPrinciples**.
