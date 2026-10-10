@@ -27,7 +27,13 @@
     "schemas/principles.json.license": "AGPL-3.0-only",
     "schemas/principle-feedback.json.license": "AGPL-3.0-only",
     "docs/site/copy.json.license": "CC-BY-SA-4.0",
-    "LICENSING.json.license": "CC-BY-SA-4.0"
+    "LICENSING.json.license": "CC-BY-SA-4.0",
+    "docs/people.md": "CC-BY-SA-4.0",
+    "docs/personal-entries.md": "CC-BY-SA-4.0",
+    "schemas/people.json": "AGPL-3.0-only",
+    "schemas/personal-entries.json": "AGPL-3.0-only",
+    "schemas/people.json.license": "AGPL-3.0-only",
+    "schemas/personal-entries.json.license": "AGPL-3.0-only"
   },
   "license_texts": {
     "AGPL-3.0-only": "LICENSES/AGPL-3.0-only.txt",

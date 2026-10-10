@@ -1,0 +1,95 @@
+{
+  "version": "1.0",
+  "protocol_version": "0.3.2",
+  "sheet_name": "Люди",
+  "table_name": "PeopleDirectory",
+  "unit": "person_card_in_owner_context",
+  "columns": [
+    {
+      "index": 0,
+      "key": "display_name",
+      "title": "Имя для отображения",
+      "type": "text",
+      "required": true,
+      "description": "Короткое или привычное имя из источника; отдельно от имени по документам."
+    },
+    {
+      "index": 1,
+      "key": "relationship",
+      "title": "Связь",
+      "type": "text",
+      "required": false,
+      "description": "Связь с владельцем карточки: свободный текст; несколько связей допустимы."
+    },
+    {
+      "index": 2,
+      "key": "phone",
+      "title": "Телефон",
+      "type": "text",
+      "required": false,
+      "description": "Текст: сохранять +, ведущие нули и исходный формат. Не угадывать номер."
+    },
+    {
+      "index": 3,
+      "key": "last_name",
+      "title": "Фамилия",
+      "type": "text",
+      "required": false,
+      "description": "Только известная фамилия."
+    },
+    {
+      "index": 4,
+      "key": "first_name",
+      "title": "Имя",
+      "type": "text",
+      "required": false,
+      "description": "Отдельная часть ФИО; не подменять прозвищем."
+    },
+    {
+      "index": 5,
+      "key": "patronymic",
+      "title": "Отчество",
+      "type": "text",
+      "required": false,
+      "description": "Только известное отчество."
+    },
+    {
+      "index": 6,
+      "key": "address_form",
+      "title": "Обращение",
+      "type": "text",
+      "required": false,
+      "description": "Как обращаться к человеку, в переданной формулировке."
+    },
+    {
+      "index": 7,
+      "key": "telegram_url",
+      "title": "Ссылка на Телеграм",
+      "type": "text",
+      "required": false,
+      "description": "Только предоставленная или подтверждённая ссылка. Не строить адрес по догадке."
+    },
+    {
+      "index": 8,
+      "key": "owner",
+      "title": "Владелец",
+      "type": "text",
+      "required": true,
+      "description": "Владелец карточки и контекст связи; это не владение человеком."
+    },
+    {
+      "index": 9,
+      "key": "person_id",
+      "title": "ID человека",
+      "type": "text",
+      "required": true,
+      "description": "Стабильный ID человека для ссылок между листами; не номер строки."
+    }
+  ],
+  "identity": "person_id remains stable; name/phone matches alone do not prove identity",
+  "relationship_context": "owner owns the card/context, never the person",
+  "initial_data": "headers only; blank data row",
+  "provenance": "inbox source IDs and processing result link to person_id and owner",
+  "write_policy": "appointed processor or explicit scoped owner instruction",
+  "literal_text": true
+}

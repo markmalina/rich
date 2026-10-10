@@ -1,0 +1,405 @@
+{
+  "version": "1.0",
+  "protocol_version": "0.3.2",
+  "unit": "personal_entry",
+  "sheets": [
+    {
+      "sheet_name": "Обиды",
+      "table_name": "Resentments",
+      "columns": [
+        {
+          "index": 0,
+          "key": "entry_text",
+          "title": "Обиды",
+          "type": "text",
+          "required": true,
+          "description": "Буквальный текст личной записи; не утверждение о доказанном поведении другого человека."
+        },
+        {
+          "index": 1,
+          "key": "recipient",
+          "title": "Кому",
+          "type": "text",
+          "required": false,
+          "description": "К кому относится запись. Допускается сам владелец, человек или группа; неизвестное оставить пустым."
+        },
+        {
+          "index": 2,
+          "key": "reason",
+          "title": "За что",
+          "type": "text",
+          "required": false,
+          "description": "Причина, поступок, событие или основание в формулировке автора; для цели — мотив или основание, если названо."
+        },
+        {
+          "index": 3,
+          "key": "owner",
+          "title": "Владелец",
+          "type": "text",
+          "required": true,
+          "description": "Чей личный опыт, мнение или цель отражены в записи; не получатель и не владелец ресурса."
+        },
+        {
+          "index": 4,
+          "key": "event_at",
+          "title": "Дата и время (МСК)",
+          "type": "datetime",
+          "required": false,
+          "description": "Время события или переживания, только если известно; не время записи."
+        },
+        {
+          "index": 5,
+          "key": "place",
+          "title": "Место",
+          "type": "text",
+          "required": false,
+          "description": "Названное место события; неизвестное не дополнять."
+        },
+        {
+          "index": 6,
+          "key": "person_id",
+          "title": "ID человека",
+          "type": "text",
+          "required": false,
+          "description": "Ссылка на человека в листе «Люди», если личность однозначно установлена."
+        },
+        {
+          "index": 7,
+          "key": "record_id",
+          "title": "ID записи",
+          "type": "text",
+          "required": true,
+          "description": "Стабильный ID личной записи; сохранять при повторной проверке."
+        },
+        {
+          "index": 8,
+          "key": "source",
+          "title": "Источник / ID входящей",
+          "type": "text",
+          "required": true,
+          "description": "Ссылки на исходные части входящего пакета, происхождение и уточнения."
+        }
+      ]
+    },
+    {
+      "sheet_name": "Вина",
+      "table_name": "Guilt",
+      "columns": [
+        {
+          "index": 0,
+          "key": "entry_text",
+          "title": "Вина",
+          "type": "text",
+          "required": true,
+          "description": "Буквальный текст личной записи; не утверждение о доказанном поведении другого человека."
+        },
+        {
+          "index": 1,
+          "key": "recipient",
+          "title": "Кому",
+          "type": "text",
+          "required": false,
+          "description": "К кому относится запись. Допускается сам владелец, человек или группа; неизвестное оставить пустым."
+        },
+        {
+          "index": 2,
+          "key": "reason",
+          "title": "За что",
+          "type": "text",
+          "required": false,
+          "description": "Причина, поступок, событие или основание в формулировке автора; для цели — мотив или основание, если названо."
+        },
+        {
+          "index": 3,
+          "key": "owner",
+          "title": "Владелец",
+          "type": "text",
+          "required": true,
+          "description": "Чей личный опыт, мнение или цель отражены в записи; не получатель и не владелец ресурса."
+        },
+        {
+          "index": 4,
+          "key": "event_at",
+          "title": "Дата и время (МСК)",
+          "type": "datetime",
+          "required": false,
+          "description": "Время события или переживания, только если известно; не время записи."
+        },
+        {
+          "index": 5,
+          "key": "place",
+          "title": "Место",
+          "type": "text",
+          "required": false,
+          "description": "Названное место события; неизвестное не дополнять."
+        },
+        {
+          "index": 6,
+          "key": "person_id",
+          "title": "ID человека",
+          "type": "text",
+          "required": false,
+          "description": "Ссылка на человека в листе «Люди», если личность однозначно установлена."
+        },
+        {
+          "index": 7,
+          "key": "record_id",
+          "title": "ID записи",
+          "type": "text",
+          "required": true,
+          "description": "Стабильный ID личной записи; сохранять при повторной проверке."
+        },
+        {
+          "index": 8,
+          "key": "source",
+          "title": "Источник / ID входящей",
+          "type": "text",
+          "required": true,
+          "description": "Ссылки на исходные части входящего пакета, происхождение и уточнения."
+        }
+      ]
+    },
+    {
+      "sheet_name": "Гордость",
+      "table_name": "Pride",
+      "columns": [
+        {
+          "index": 0,
+          "key": "entry_text",
+          "title": "Гордость",
+          "type": "text",
+          "required": true,
+          "description": "Буквальный текст личной записи; не утверждение о доказанном поведении другого человека."
+        },
+        {
+          "index": 1,
+          "key": "recipient",
+          "title": "Кому",
+          "type": "text",
+          "required": false,
+          "description": "К кому относится запись. Допускается сам владелец, человек или группа; неизвестное оставить пустым."
+        },
+        {
+          "index": 2,
+          "key": "reason",
+          "title": "За что",
+          "type": "text",
+          "required": false,
+          "description": "Причина, поступок, событие или основание в формулировке автора; для цели — мотив или основание, если названо."
+        },
+        {
+          "index": 3,
+          "key": "owner",
+          "title": "Владелец",
+          "type": "text",
+          "required": true,
+          "description": "Чей личный опыт, мнение или цель отражены в записи; не получатель и не владелец ресурса."
+        },
+        {
+          "index": 4,
+          "key": "event_at",
+          "title": "Дата и время (МСК)",
+          "type": "datetime",
+          "required": false,
+          "description": "Время события или переживания, только если известно; не время записи."
+        },
+        {
+          "index": 5,
+          "key": "place",
+          "title": "Место",
+          "type": "text",
+          "required": false,
+          "description": "Названное место события; неизвестное не дополнять."
+        },
+        {
+          "index": 6,
+          "key": "person_id",
+          "title": "ID человека",
+          "type": "text",
+          "required": false,
+          "description": "Ссылка на человека в листе «Люди», если личность однозначно установлена."
+        },
+        {
+          "index": 7,
+          "key": "record_id",
+          "title": "ID записи",
+          "type": "text",
+          "required": true,
+          "description": "Стабильный ID личной записи; сохранять при повторной проверке."
+        },
+        {
+          "index": 8,
+          "key": "source",
+          "title": "Источник / ID входящей",
+          "type": "text",
+          "required": true,
+          "description": "Ссылки на исходные части входящего пакета, происхождение и уточнения."
+        }
+      ]
+    },
+    {
+      "sheet_name": "Цели",
+      "table_name": "Goals",
+      "columns": [
+        {
+          "index": 0,
+          "key": "entry_text",
+          "title": "Цели",
+          "type": "text",
+          "required": true,
+          "description": "Буквальный текст личной записи; не утверждение о доказанном поведении другого человека."
+        },
+        {
+          "index": 1,
+          "key": "recipient",
+          "title": "Кому",
+          "type": "text",
+          "required": false,
+          "description": "К кому относится запись. Допускается сам владелец, человек или группа; неизвестное оставить пустым."
+        },
+        {
+          "index": 2,
+          "key": "reason",
+          "title": "За что",
+          "type": "text",
+          "required": false,
+          "description": "Причина, поступок, событие или основание в формулировке автора; для цели — мотив или основание, если названо."
+        },
+        {
+          "index": 3,
+          "key": "owner",
+          "title": "Владелец",
+          "type": "text",
+          "required": true,
+          "description": "Чей личный опыт, мнение или цель отражены в записи; не получатель и не владелец ресурса."
+        },
+        {
+          "index": 4,
+          "key": "event_at",
+          "title": "Дата и время (МСК)",
+          "type": "datetime",
+          "required": false,
+          "description": "Время события или переживания, только если известно; не время записи."
+        },
+        {
+          "index": 5,
+          "key": "place",
+          "title": "Место",
+          "type": "text",
+          "required": false,
+          "description": "Названное место события; неизвестное не дополнять."
+        },
+        {
+          "index": 6,
+          "key": "person_id",
+          "title": "ID человека",
+          "type": "text",
+          "required": false,
+          "description": "Ссылка на человека в листе «Люди», если личность однозначно установлена."
+        },
+        {
+          "index": 7,
+          "key": "record_id",
+          "title": "ID записи",
+          "type": "text",
+          "required": true,
+          "description": "Стабильный ID личной записи; сохранять при повторной проверке."
+        },
+        {
+          "index": 8,
+          "key": "source",
+          "title": "Источник / ID входящей",
+          "type": "text",
+          "required": true,
+          "description": "Ссылки на исходные части входящего пакета, происхождение и уточнения."
+        }
+      ]
+    },
+    {
+      "sheet_name": "Благодарность",
+      "table_name": "Gratitude",
+      "columns": [
+        {
+          "index": 0,
+          "key": "entry_text",
+          "title": "Благодарность",
+          "type": "text",
+          "required": true,
+          "description": "Буквальный текст личной записи; не утверждение о доказанном поведении другого человека."
+        },
+        {
+          "index": 1,
+          "key": "recipient",
+          "title": "Кому",
+          "type": "text",
+          "required": false,
+          "description": "К кому относится запись. Допускается сам владелец, человек или группа; неизвестное оставить пустым."
+        },
+        {
+          "index": 2,
+          "key": "reason",
+          "title": "За что",
+          "type": "text",
+          "required": false,
+          "description": "Причина, поступок, событие или основание в формулировке автора; для цели — мотив или основание, если названо."
+        },
+        {
+          "index": 3,
+          "key": "owner",
+          "title": "Владелец",
+          "type": "text",
+          "required": true,
+          "description": "Чей личный опыт, мнение или цель отражены в записи; не получатель и не владелец ресурса."
+        },
+        {
+          "index": 4,
+          "key": "event_at",
+          "title": "Дата и время (МСК)",
+          "type": "datetime",
+          "required": false,
+          "description": "Время события или переживания, только если известно; не время записи."
+        },
+        {
+          "index": 5,
+          "key": "place",
+          "title": "Место",
+          "type": "text",
+          "required": false,
+          "description": "Названное место события; неизвестное не дополнять."
+        },
+        {
+          "index": 6,
+          "key": "person_id",
+          "title": "ID человека",
+          "type": "text",
+          "required": false,
+          "description": "Ссылка на человека в листе «Люди», если личность однозначно установлена."
+        },
+        {
+          "index": 7,
+          "key": "record_id",
+          "title": "ID записи",
+          "type": "text",
+          "required": true,
+          "description": "Стабильный ID личной записи; сохранять при повторной проверке."
+        },
+        {
+          "index": 8,
+          "key": "source",
+          "title": "Источник / ID входящей",
+          "type": "text",
+          "required": true,
+          "description": "Ссылки на исходные части входящего пакета, происхождение и уточнения."
+        }
+      ]
+    }
+  ],
+  "category_policy": "Only explicitly expressed by the owner; ambiguous input remains in inbox pending clarification",
+  "source_policy": "Keep literal raw input in inbox; source field links original record IDs",
+  "ownership": "Owner of the personal account is distinct from recipient, author and provider",
+  "required_column_vs_value": "recipient and reason columns exist on every sheet; their values are optional",
+  "write_policy": "appointed processor or explicit scoped owner instruction",
+  "literal_text": true,
+  "initial_data": "headers only; blank data row",
+  "timezone": "UTC+03:00"
+}
