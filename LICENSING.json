@@ -33,7 +33,8 @@
     "schemas/people.json": "AGPL-3.0-only",
     "schemas/personal-entries.json": "AGPL-3.0-only",
     "schemas/people.json.license": "AGPL-3.0-only",
-    "schemas/personal-entries.json.license": "AGPL-3.0-only"
+    "schemas/personal-entries.json.license": "AGPL-3.0-only",
+    "docs/vision.md": "CC-BY-SA-4.0"
   },
   "license_texts": {
     "AGPL-3.0-only": "LICENSES/AGPL-3.0-only.txt",
