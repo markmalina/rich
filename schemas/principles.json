@@ -1,5 +1,5 @@
 {
-  "version": "0.3",
+  "version": "0.4",
   "sheet_name": "Принципы",
   "table_name": "PersonalPrinciples",
   "unit": "personal_principle",
@@ -17,6 +17,44 @@
       "title": "Владелец",
       "type": "text",
       "required": true
+    },
+    {
+      "index": 2,
+      "key": "date",
+      "title": "Дата",
+      "type": "date",
+      "required": false,
+      "meaning": "Date of principle/belief recording; do not backfill old rows without a known date."
+    },
+    {
+      "index": 3,
+      "key": "belief",
+      "title": "Убеждение",
+      "type": "text",
+      "required": false
+    },
+    {
+      "index": 4,
+      "key": "example",
+      "title": "Пример",
+      "type": "text",
+      "required": false,
+      "meaning": "Illustrative scenario; does not establish performed action."
+    },
+    {
+      "index": 5,
+      "key": "principle_id",
+      "title": "ID принципа",
+      "type": "text",
+      "required": false,
+      "meaning": "Stable identifier for new principles and journal links; old rows may remain empty."
+    },
+    {
+      "index": 6,
+      "key": "source_record_id",
+      "title": "ID исходника",
+      "type": "text",
+      "required": false
     }
   ],
   "literal_text": true,
@@ -36,5 +74,84 @@
     "delivery": "Show to the person through the receiving Work in an authorized private conversation; without transport mark prepared, not delivered.",
     "raw_input": "Always preserve and accept; do not invent missing details.",
     "completion": "Unresolved required clarification prevents final processing completion."
-  }
+  },
+  "compatibility": "A:B remain unchanged; append C:G and preserve all old rows. Date is a numeric Sheets date. Unknown historic dates and IDs remain blank.",
+  "practice_journal": {
+    "version": "1.0",
+    "sheet_name": "Применение принципов",
+    "table_name": "PrinciplePractice",
+    "unit": "one_example_or_application",
+    "columns": [
+      {
+        "index": 0,
+        "key": "date",
+        "title": "Дата",
+        "type": "date",
+        "required": true,
+        "meaning": "Date recorded, not an inferred event date."
+      },
+      {
+        "index": 1,
+        "key": "principle_id",
+        "title": "ID принципа",
+        "type": "text",
+        "required": true
+      },
+      {
+        "index": 2,
+        "key": "example",
+        "title": "Пример",
+        "type": "text",
+        "required": true
+      },
+      {
+        "index": 3,
+        "key": "status",
+        "title": "Статус",
+        "type": "text",
+        "allowed_values": [
+          "Разбор",
+          "Намерение",
+          "Применено"
+        ],
+        "required": true
+      },
+      {
+        "index": 4,
+        "key": "conscious_application",
+        "title": "Осознанно",
+        "type": "text",
+        "allowed_values": [
+          "Не подтверждено",
+          "Да",
+          "Нет"
+        ],
+        "required": true
+      },
+      {
+        "index": 5,
+        "key": "actual_action",
+        "title": "Фактическое действие",
+        "type": "text",
+        "required": false
+      },
+      {
+        "index": 6,
+        "key": "result",
+        "title": "Результат",
+        "type": "text",
+        "required": false
+      },
+      {
+        "index": 7,
+        "key": "source_record_id",
+        "title": "ID исходника",
+        "type": "text",
+        "required": true
+      }
+    ],
+    "write_policy": "Explicit instruction by the owner. Add further examples as separate linked rows; do not replace earlier examples. Applied requires an actual reported action; conscious=yes requires explicit owner confirmation of awareness in that action. Reflection is not payment or application. Unknown event dates and results stay unknown; preserve original source.",
+    "automation": "Manual protocol only; no background detection, scheduling, or automatic writes are implied."
+  },
+  "belief_policy": "A belief is the owner's stated personal attitude, not verification of cash balance or a guarantee of future income. Preserve literal input separately; do not infer financial transactions from a belief or example."
 }
