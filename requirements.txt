@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 System Rich contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+
+google-auth[requests]>=2.38,<3
+requests>=2.32,<3
