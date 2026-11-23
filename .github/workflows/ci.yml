@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 System Rich contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+
+name: Rich CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s . -p 'test_*.py' -v
+      - run: node --check < tracking/face-sync.gs
+      - run: docker build --tag rich-tracker-test .
