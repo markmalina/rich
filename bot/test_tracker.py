@@ -5,6 +5,7 @@ import datetime as dt
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from .ledger import EVENT_FIELDS, MOSCOW, QUERY_FIELDS, Clarification, ledger_rows, summarize_query
 from .main import Bot, attachment
@@ -109,3 +110,20 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(len(google.inbox), 1)
         self.assertEqual(len(google.events), 2)
         self.assertEqual(len(google.updates), 1)
+
+
+class TelegramOnlyTest(unittest.TestCase):
+    def test_start_and_report_are_answered_without_processing_the_report(self):
+        telegram = Mock()
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            bot = Bot(telegram, None, None, Path(directory), 7)
+            try:
+                bot.handle(1, {"chat": {"id": 7}, "text": "/start"}, NOW)
+                with patch.object(bot, "capture") as capture:
+                    bot.handle(2, {"chat": {"id": 7}, "voice": {"file_id": "test"}}, NOW)
+                    capture.assert_not_called()
+                telegram.media.assert_not_called()
+                self.assertIn("Telegram подключён", telegram.message.call_args_list[0].args[1])
+                self.assertIn("Пришли сообщение заново", telegram.message.call_args_list[1].args[1])
+            finally:
+                bot.db.close()
