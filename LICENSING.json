@@ -44,6 +44,7 @@
     "bot/providers.py": "AGPL-3.0-only",
     "bot/test_tracker.py": "AGPL-3.0-only",
     "docs/google-base.md": "CC-BY-SA-4.0",
+    "docs/glossary.md": "CC-BY-SA-4.0",
     "docs/history/AGENTS.md": "CC-BY-SA-4.0",
     "docs/history/README.md": "CC-BY-SA-4.0",
     "requirements.txt": "AGPL-3.0-only",

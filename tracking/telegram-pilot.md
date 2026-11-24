@@ -1,9 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 System Rich contributors -->
 <!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
 
-# Личный Telegram-бот Rich
+# eRex · личный Telegram-пилот
 
-Бот из этого репозитория обслуживает одну настроенную «БАЗУ» и принимает личные сообщения от одного заданного Telegram ID. Он дополняет [работу с собственным ИИ](assistant-prompt.md).
+eRex (RX) — личный помощник по лайф-трекингу. Его зарегистрированный адрес — [@ErexoBot](https://t.me/ErexoBot). Текущий пилот обслуживает одну настроенную «БАЗУ» и принимает личные сообщения от одного заданного Telegram ID. Он дополняет [работу с собственным ИИ](assistant-prompt.md).
 
 ## Что умеет
 
@@ -12,6 +12,8 @@
 - Читать «События» по дате, действию, категории и поисковой строке. Face обновляется по настроенному расписанию Google.
 
 Голос отправляется в OpenAI Audio Transcriptions, по умолчанию используется `gpt-transcribe`. Текст и изображения обрабатывает Responses API с `gpt-5.4-mini` по умолчанию. Используйте доступ провайдера, выданный для вашего развёртывания.
+
+[Обозначения проекта](../docs/glossary.md).
 
 ## Подключение
 
@@ -23,7 +25,7 @@
 | --- | --- |
 | `TELEGRAM_BOT_TOKEN` | Токен бота |
 | `TRACKER_OWNER_ID` | Telegram ID владельца |
-| `OPENAI_API_KEY` | Ключ API проекта |
+| `OPENAI_API_KEY` | Ключ отдельного OpenAI-проекта RX |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | JSON учётных данных для доступной «БАЗЫ» |
 | `TRACKER_SPREADSHEET_ID` | ID «БАЗЫ» |
 | `TRACKER_DATA_DIR` | Путь к постоянному диску оригиналов, SQLite и позиции чтения Telegram |
