@@ -59,7 +59,10 @@
     "tracking/roadmap.md": "CC-BY-SA-4.0",
     "tracking/telegram-pilot.md": "CC-BY-SA-4.0",
     "tracking/telegram-prompt.md": "CC-BY-SA-4.0",
-    "tracking/test_bootstrap.py": "AGPL-3.0-only"
+    "tracking/test_bootstrap.py": "AGPL-3.0-only",
+    "tracking/sheets-bridge.gs": "AGPL-3.0-only",
+    "tracking/test_sheets_bridge.cjs": "AGPL-3.0-only",
+    "bot/test_script_sheets.py": "AGPL-3.0-only"
   },
   "license_texts": {
     "AGPL-3.0-only": "LICENSES/AGPL-3.0-only.txt",
