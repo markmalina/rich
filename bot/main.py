@@ -20,8 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 INBOX = "Входящие"
 EVENTS = "События"
-REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_OWNER_ID", "OPENAI_API_KEY", "GOOGLE_SERVICE_ACCOUNT_JSON",
-            "TRACKER_SPREADSHEET_ID", "TRACKER_DATA_DIR")
+REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_OWNER_ID", "TRACKER_DATA_DIR")
+LEDGER_REQUIRED = ("OPENAI_API_KEY", "GOOGLE_SERVICE_ACCOUNT_JSON", "TRACKER_SPREADSHEET_ID")
+LEDGER_UNAVAILABLE = "Запись в «БАЗУ» пока недоступна. Пришли сообщение заново после её подключения."
 
 
 def attachment(message):
@@ -64,11 +65,15 @@ class Bot:
                                 [(update["update_id"], stamp) for update in updates])
 
     def run(self):
+        first_poll = True
         while True:
             try:
                 updates = self.telegram.api("getUpdates", {
                     "offset": self.get("offset", 0), "timeout": 25, "allowed_updates": ["message"],
                 })
+                if first_poll:
+                    logging.info("Telegram API: опрос обновлений подтверждён")
+                    first_poll = False
                 self.receive(updates)
                 for update in updates:
                     update_id = update["update_id"]
@@ -111,6 +116,12 @@ class Bot:
     def handle(self, update_id, message, received):
         chat = message["chat"]["id"]
         text = message.get("text") or message.get("caption") or ""
+        if self.sheets is None:
+            if text == "/start":
+                self.telegram.message(chat, "Привет, я eRex. Telegram подключён. Запись в «БАЗУ» пока недоступна.")
+            else:
+                self.telegram.message(chat, LEDGER_UNAVAILABLE)
+            return
         if text == "/start":
             self.telegram.message(chat, "Присылай текст, голосовое или фото чека. Можешь спросить «Что я сегодня ел?».")
             return
@@ -235,7 +246,9 @@ class Bot:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    missing = [name for name in REQUIRED if not os.environ.get(name)]
+    telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
+    required = REQUIRED if telegram_only else (*REQUIRED, *LEDGER_REQUIRED)
+    missing = [name for name in required if not os.environ.get(name)]
     if missing:
         logging.info("Ожидание настройки: %s", ", ".join(missing))
         while True:
@@ -248,13 +261,17 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         session = requests.Session()
         telegram = Telegram(session, os.environ["TELEGRAM_BOT_TOKEN"])
-        sheets = Sheets(os.environ["TRACKER_SPREADSHEET_ID"], json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]))
-        model = Model(session, os.environ["OPENAI_API_KEY"], os.environ.get("TRACKER_MODEL", "gpt-5.4-mini"),
-                      os.environ.get("TRACKER_TRANSCRIBE_MODEL", "gpt-transcribe"))
-        if sheets.read(f"'{INBOX}'!A1:H1") != [INBOX_HEADERS] or sheets.read(f"'{EVENTS}'!I1") != [["ID входящего"]]:
-            raise ProviderError("Google Sheets", "unsupported ledger schema")
-        telegram.api("getMe", {})
-        logging.info("Tracker готов принимать личные сообщения")
+        sheets = None
+        model = None
+        if not telegram_only:
+            sheets = Sheets(os.environ["TRACKER_SPREADSHEET_ID"], json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]))
+            model = Model(session, os.environ["OPENAI_API_KEY"], os.environ.get("TRACKER_MODEL", "gpt-5.4-mini"),
+                          os.environ.get("TRACKER_TRANSCRIBE_MODEL", "gpt-transcribe"))
+            if sheets.read(f"'{INBOX}'!A1:H1") != [INBOX_HEADERS] or sheets.read(f"'{EVENTS}'!I1") != [["ID входящего"]]:
+                raise ProviderError("Google Sheets", "unsupported ledger schema")
+        account = telegram.api("getMe", {})
+        logging.info("Telegram @%s: %s", account["username"],
+                     "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
         Bot(telegram, sheets, model, data, int(os.environ["TRACKER_OWNER_ID"])).run()
 
 
