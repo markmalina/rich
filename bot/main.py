@@ -14,14 +14,15 @@ import time
 from .ledger import (
     Clarification, INBOX_HEADERS, MOSCOW, PLAN_SCHEMA, ledger_rows, sheets_timestamp, summarize_query,
 )
-from .providers import Model, ProviderError, Sheets, Telegram
+from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 INBOX = "Входящие"
 EVENTS = "События"
-REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_OWNER_ID", "OPENAI_API_KEY", "GOOGLE_SERVICE_ACCOUNT_JSON",
+REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_OWNER_ID", "OPENAI_API_KEY",
             "TRACKER_SPREADSHEET_ID", "TRACKER_DATA_DIR")
+SCRIPT_SETTINGS = ("TRACKER_APPS_SCRIPT_URL", "TRACKER_APPS_SCRIPT_TOKEN")
 
 
 def attachment(message):
@@ -235,7 +236,9 @@ class Bot:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    missing = [name for name in REQUIRED if not os.environ.get(name)]
+    google_settings = (SCRIPT_SETTINGS if any(os.environ.get(name) for name in SCRIPT_SETTINGS)
+                       else ("GOOGLE_SERVICE_ACCOUNT_JSON",))
+    missing = [name for name in (*REQUIRED, *google_settings) if not os.environ.get(name)]
     if missing:
         logging.info("Ожидание настройки: %s", ", ".join(missing))
         while True:
@@ -248,7 +251,11 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         session = requests.Session()
         telegram = Telegram(session, os.environ["TELEGRAM_BOT_TOKEN"])
-        sheets = Sheets(os.environ["TRACKER_SPREADSHEET_ID"], json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]))
+        spreadsheet = os.environ["TRACKER_SPREADSHEET_ID"]
+        if google_settings == SCRIPT_SETTINGS:
+            sheets = ScriptSheets(session, *(os.environ[name] for name in SCRIPT_SETTINGS), spreadsheet)
+        else:
+            sheets = Sheets(spreadsheet, json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]))
         model = Model(session, os.environ["OPENAI_API_KEY"], os.environ.get("TRACKER_MODEL", "gpt-5.4-mini"),
                       os.environ.get("TRACKER_TRANSCRIBE_MODEL", "gpt-transcribe"))
         if sheets.read(f"'{INBOX}'!A1:H1") != [INBOX_HEADERS] or sheets.read(f"'{EVENTS}'!I1") != [["ID входящего"]]:

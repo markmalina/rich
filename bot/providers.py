@@ -3,7 +3,8 @@
 
 import base64
 import json
-from urllib.parse import quote
+import re
+from urllib.parse import quote, urlsplit
 
 SHEETS_URL = "https://sheets.googleapis.com/v4/spreadsheets"
 OPENAI_URL = "https://api.openai.com/v1"
@@ -86,6 +87,60 @@ class Sheets:
         url = f"{self.url}/{quote(area, safe='')}"
         request(self.session, "Google Sheets", "PUT", url, params={"valueInputOption": "RAW"},
                 json={"values": values}, timeout=30)
+
+
+class ScriptSheets:
+    """The same Sheets operations, through a spreadsheet-scoped Apps Script deployment."""
+
+    def __init__(self, session, url, token, spreadsheet_id):
+        if not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", url):
+            raise ProviderError("Apps Script", "invalid deployment URL")
+        if not re.fullmatch(r"[a-f0-9]{64}", token):
+            raise ProviderError("Apps Script", "invalid bridge token")
+        self.session = session
+        self.url = url
+        self.token = token
+        self.spreadsheet_id = spreadsheet_id
+
+    def call(self, operation, area, rows=None):
+        response = request(
+            self.session, "Apps Script", "POST", self.url, timeout=30, allow_redirects=False,
+            json={"operation": operation, "range": area, "rows": rows, "token": self.token,
+                  "spreadsheet_id": self.spreadsheet_id},
+        )
+        if response.status_code in {302, 303}:
+            location = response.headers.get("Location", "")
+            target = urlsplit(location)
+            if (target.scheme != "https" or target.netloc != "script.googleusercontent.com"
+                    or target.path != "/macros/echo"):
+                raise ProviderError("Apps Script", "unexpected redirect")
+            response = request(self.session, "Apps Script", "GET", location, timeout=30, allow_redirects=False)
+        if response.status_code != 200:
+            raise ProviderError("Apps Script", "unexpected response status")
+        try:
+            result = response.json()
+        except ValueError:
+            raise ProviderError("Apps Script", "invalid response") from None
+        if not isinstance(result, dict) or "error" in result:
+            raise ProviderError("Apps Script", "operation rejected")
+        return result
+
+    def read(self, area):
+        values = self.call("read", area).get("values")
+        if not isinstance(values, list) or any(not isinstance(row, list) for row in values):
+            raise ProviderError("Apps Script", "invalid values")
+        return values
+
+    def append(self, area, rows):
+        count = self.call("append", area, rows).get("updated_rows")
+        if type(count) is not int or count != len(rows):
+            raise ProviderError("Apps Script", "unexpected number of rows")
+        return count
+
+    def update(self, area, values):
+        result = self.call("update", area, values)
+        if result.get("updated_rows") != len(values):
+            raise ProviderError("Apps Script", "update not confirmed")
 
 
 class Model:
