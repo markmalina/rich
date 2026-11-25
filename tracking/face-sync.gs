@@ -4,6 +4,8 @@
 const FACE_HEADERS = ['Дата', 'Время (МСК)', 'Категория', 'Действие', 'Описание', 'Количество', 'Ед.', 'Длительность, мин', 'Расход, ккал', 'Тип времени'];
 const FACE_ROUTE_HEADERS = ["Face","Таблица назначения","Физические упражнения","Приём пищи","Замеры","Практики","Режим дня","Чтение и обучение"];
 const FACE_CATEGORIES = new Set(FACE_ROUTE_HEADERS.slice(2));
+const RX_REGISTRY_HEADERS = ['БАЗА', 'Face', 'Лист Face'];
+const RX_REGISTRY_PROPERTY = 'RICH_FACE_REGISTRY_ID';
 
 function installFaceSync() {
   const base = SpreadsheetApp.getActiveSpreadsheet();
@@ -55,6 +57,75 @@ function syncFace(event) {
   } finally {
     lock.releaseLock();
   }
+}
+
+function installRegisteredFaceSync() {
+  syncRegisteredFaces();
+  const installed = ScriptApp.getProjectTriggers()
+    .some(trigger => trigger.getHandlerFunction() === 'syncRegisteredFaces'
+      && trigger.getEventType() === ScriptApp.EventType.CLOCK);
+  if (!installed) ScriptApp.newTrigger('syncRegisteredFaces').timeBased().everyMinutes(5).create();
+}
+
+function syncRegisteredFaces() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(25000);
+  try {
+    SpreadsheetApp.flush();
+    const registryId = PropertiesService.getScriptProperties().getProperty(RX_REGISTRY_PROPERTY);
+    if (!registryId) throw new Error('Задайте свойство RICH_FACE_REGISTRY_ID.');
+    const data = Sheets.Spreadsheets.Values.get(registryId, "'Пары'!A:C", { valueRenderOption: 'UNFORMATTED_VALUE' });
+    const pairs = registeredFacePairs_(data.values || [], registryId);
+    let failed = 0;
+    for (const pair of pairs) {
+      try {
+        syncRegisteredPair_(pair);
+      } catch (error) {
+        failed++;
+        console.error('Не удалось обновить Face. Строка реестра ' + pair.row + '.');
+      }
+    }
+    if (failed) throw new Error('Face: не подтверждены обновления витрин — ' + failed);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function registeredFacePairs_(values, registryId) {
+  const [header, ...rows] = values;
+  if (JSON.stringify(header) !== JSON.stringify(RX_REGISTRY_HEADERS)) {
+    throw new Error('Неверные заголовки реестра Face.');
+  }
+  const taken = new Set([registryId]);
+  const pairs = [];
+  for (const [index, row] of rows.entries()) {
+    if (row.every(value => value === '')) continue;
+    const [baseId, id, gid] = row;
+    const fileId = value => typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value);
+    if (!fileId(baseId) || !fileId(id) || taken.has(baseId) || taken.has(id) || baseId === id
+        || !Number.isSafeInteger(gid) || gid < 0) {
+      throw new Error('Неверная пара в реестре Face. Строка ' + (index + 2) + '.');
+    }
+    taken.add(baseId);
+    taken.add(id);
+    pairs.push({ baseId, id, gid, row: index + 2 });
+  }
+  return pairs;
+}
+
+function syncRegisteredPair_(pair) {
+  const base = SpreadsheetApp.openById(pair.baseId);
+  const exported = base.getSheetByName('Экспорт Faces');
+  if (!exported) throw new Error('В БАЗЕ отсутствует вкладка «Экспорт Faces».');
+  const route = faceRoutes_(base).find(route => route.id === pair.id && route.gid === pair.gid);
+  if (!route) throw new Error('На вкладке Faces отсутствует запись для зарегистрированной витрины.');
+  const source = faceSheet_({ id: pair.baseId, gid: exported.getSheetId() });
+  const target = faceSheet_(pair);
+  if (target.title !== 'События' || target.fileTitle !== route.name) {
+    throw new Error('Назначение в Faces не совпадает с файлом или листом.');
+  }
+  const selected = faceRows_(source, true).filter(row => route.categories.has(row[2].stringValue));
+  writeFace_(target, selected);
 }
 
 function faceRoutes_(base) {
