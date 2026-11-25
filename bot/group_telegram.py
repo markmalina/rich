@@ -9,12 +9,11 @@ import time
 
 from .group_face import group_face_rows
 from .group_reports import Practice, Publication, Report, ReportJournal, build_report, number
-from .ledger import MOSCOW
+from .ledger import FINANCIAL_LABELS, MOSCOW
 from .providers import ProviderError
 
 QUERY = re.compile(r"отчёт (-[0-9]{1,18}) (сегодня|вчера)( исправление)?")
 REPORT_CODE = "\nRX · "
-FORBIDDEN = {"Финансы", "Приобретение", "Оплата", "Перевод денег", "Доход", "Расход"}
 UPDATE_TYPES = ["inline_query", "chat_member"]
 HISTORY = re.compile(r"/reports(?:@([a-zA-Z0-9_]+))?(?: ([1-9][0-9]{0,3}))?", re.IGNORECASE)
 HISTORY_PAGE_SIZE = 3
@@ -78,7 +77,7 @@ def configured_groups(config):
                 minimum = number(raw) if raw is not None else None
                 if (not all(isinstance(value, str) and value.strip() and len(value) <= 80
                             and value.splitlines() == [value] for value in (action, label, unit))
-                        or action in FORBIDDEN or unit.upper() in {"RUB", "BYN", "USD", "EUR", "₽"}
+                        or action in FINANCIAL_LABELS or unit.upper() in {"RUB", "BYN", "USD", "EUR", "₽"}
                         or (raw is not None and (minimum is None or minimum < 0))):
                     raise ValueError("invalid agreed practice")
                 practices.append(Practice(action, label, unit, minimum))
