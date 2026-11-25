@@ -12,6 +12,7 @@ from .ledger import INBOX_HEADERS
 from .providers import ProviderError, SHEETS_URL, Sheets, request
 
 DRIVE_URL = "https://www.googleapis.com/drive/v3/files"
+DRIVE_ABOUT_URL = "https://www.googleapis.com/drive/v3/about"
 OAUTH_SCOPE = "https://www.googleapis.com/auth/drive.file"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 REGISTRY = "'Пары'!A:C"
@@ -48,6 +49,24 @@ class PilotProvisioner:
 
     def google(self, method, url, **kwargs):
         return request(self.session, "Google pilot", method, url, timeout=30, **kwargs).json()
+
+    def verify_registry(self, expected_email):
+        account = self.google("GET", DRIVE_ABOUT_URL, params={"fields": "user(emailAddress)"})
+        email = account.get("user", {}).get("emailAddress", "")
+        if not email or email.casefold() != expected_email.strip().casefold():
+            raise ProviderError("RX pilot", "unexpected Google account")
+        url = f"{DRIVE_URL}/{self.registry_id}"
+        metadata = self.google("GET", url, params={"fields": "id,mimeType,ownedByMe,trashed"})
+        if (metadata.get("id") != self.registry_id or metadata.get("mimeType") != SHEET_MIME
+                or metadata.get("ownedByMe") is not True or metadata.get("trashed") is not False):
+            raise ProviderError("RX pilot", "registry must be owned by the pilot Google account")
+        access = self.google("GET", url + "/permissions", params={
+            "fields": "nextPageToken,permissions(type,role)", "pageSize": 20,
+        })
+        if access.get("nextPageToken") or access.get("permissions") != [{"type": "user", "role": "owner"}]:
+            raise ProviderError("RX pilot", "registry must be private")
+        if self.registry.read("'Пары'!A1:C1") != [REGISTRY_HEADERS]:
+            raise ProviderError("RX pilot", "unsupported registry schema")
 
     def provision(self, state, save):
         if state is None:
