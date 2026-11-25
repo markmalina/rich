@@ -204,6 +204,33 @@ class ReportJournal:
             ORDER BY publication.sent_at, publication.message
         """, (chat, joined)).fetchall()
 
+    def recent_history(self, chat, viewer, limit, offset):
+        joined = self.joined(chat, viewer)
+        if joined is None:
+            return []
+        return self.db.execute("""
+            SELECT preview.author, preview.day, preview.text, publication.sent_at
+            FROM report_publications AS publication
+            JOIN report_previews AS preview ON preview.token = publication.token
+            WHERE preview.chat = ? AND publication.sent_at >= ?
+            ORDER BY publication.sent_at DESC, publication.message DESC
+            LIMIT ? OFFSET ?
+        """, (chat, joined, limit, offset)).fetchall()
+
+    def latest_by_day(self, chat):
+        return self.db.execute("""
+            WITH versions AS (
+                SELECT preview.author, preview.day, preview.text, publication.sent_at, publication.message,
+                       ROW_NUMBER() OVER (PARTITION BY preview.author, preview.day
+                                          ORDER BY publication.sent_at DESC, publication.message DESC) AS revision
+                FROM report_publications AS publication
+                JOIN report_previews AS preview ON preview.token = publication.token
+                WHERE preview.chat = ?
+            )
+            SELECT author, day, text, sent_at, message
+            FROM versions WHERE revision = 1 ORDER BY day, author
+        """, (chat,)).fetchall()
+
     def missed(self, chat, author, day, now):
         end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), tzinfo=MOSCOW).timestamp()
         if now < end:

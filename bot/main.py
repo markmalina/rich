@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 
+from .group_face import GroupFace
 from .group_telegram import UPDATE_TYPES, GroupTelegram, configured_groups
 from .ledger import (
     Clarification, INBOX_HEADERS, MOSCOW, PLAN_SCHEMA, ledger_rows, sheets_timestamp, summarize_query,
@@ -73,6 +74,8 @@ class Bot:
         update_types = ["message"] + (UPDATE_TYPES if self.groups is not None else [])
         while True:
             try:
+                if self.groups is not None:
+                    self.groups.sync_group_faces()
                 updates = self.telegram.api("getUpdates", {
                     "offset": self.get("offset", 0), "timeout": 25, "allowed_updates": update_types,
                 })
@@ -84,8 +87,11 @@ class Bot:
                     update_id = update["update_id"]
                     message = update.get("message", {})
                     if message.get("chat", {}).get("type") == "private":
-                        saved_at = self.db.execute("SELECT received FROM receipts WHERE id = ?", (update_id,)).fetchone()[0]
-                        self.dispatch(update_id, message, dt.datetime.fromisoformat(saved_at))
+                        if self.groups is None or not self.groups.private_history(message):
+                            saved_at = self.db.execute(
+                                "SELECT received FROM receipts WHERE id = ?", (update_id,),
+                            ).fetchone()[0]
+                            self.dispatch(update_id, message, dt.datetime.fromisoformat(saved_at))
                     elif self.groups is not None:
                         try:
                             self.groups.handle(update)
@@ -302,6 +308,7 @@ def main():
     telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
     pilot = os.environ.get("TRACKER_PILOT") == "1"
     groups_config = os.environ.get("TRACKER_REPORT_GROUPS")
+    face_tokens_config = os.environ.get("TRACKER_REPORT_FACE_TOKENS")
     owner = os.environ.get("TRACKER_OWNER_ID")
     if telegram_only and pilot:
         raise ProviderError("RX pilot", "incompatible worker modes")
@@ -309,6 +316,11 @@ def main():
         raise ProviderError("RX pilot", "group reports require pilot mode")
     try:
         groups = configured_groups(json.loads(groups_config)) if groups_config else {}
+        face_tokens = json.loads(face_tokens_config) if face_tokens_config else {}
+        face_chats = {str(chat) for chat, group in groups.items() if group.face}
+        if (not isinstance(face_tokens, dict) or set(face_tokens) != face_chats
+                or any(not isinstance(value, str) or not value.strip() for value in face_tokens.values())):
+            raise ValueError("missing or invalid group Face credentials")
     except (ValueError, TypeError, KeyError, AttributeError):
         raise ProviderError("RX pilot", "invalid group report configuration") from None
     google_settings = (SCRIPT_SETTINGS if any(os.environ.get(name) for name in SCRIPT_SETTINGS)
@@ -355,7 +367,12 @@ def main():
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
         bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
         if groups:
-            bot.groups = GroupTelegram(telegram, account, bot.db, groups, bot.report_sheet)
+            faces = {
+                chat: GroupFace(oauth_session(os.environ[OAUTH_KEYS[0]], os.environ[OAUTH_KEYS[1]],
+                                              face_tokens[str(chat)]), chat, group.face)
+                for chat, group in groups.items() if group.face
+            }
+            bot.groups = GroupTelegram(telegram, account, bot.db, groups, bot.report_sheet, faces)
             bot.groups.verify_groups()
         bot.run()
 

@@ -68,7 +68,9 @@
     "bot/test_onboarding.py": "AGPL-3.0-only",
     "bot/group_reports.py": "AGPL-3.0-only",
     "bot/group_telegram.py": "AGPL-3.0-only",
-    "bot/test_group_reports.py": "AGPL-3.0-only"
+    "bot/test_group_reports.py": "AGPL-3.0-only",
+    "bot/group_face.py": "AGPL-3.0-only",
+    "bot/test_group_face.py": "AGPL-3.0-only"
   },
   "license_texts": {
     "AGPL-3.0-only": "LICENSES/AGPL-3.0-only.txt",

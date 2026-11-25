@@ -7,6 +7,7 @@ import logging
 import re
 import time
 
+from .group_face import group_face_rows
 from .group_reports import Practice, Publication, Report, ReportJournal, build_report, number
 from .ledger import MOSCOW
 from .providers import ProviderError
@@ -15,6 +16,8 @@ QUERY = re.compile(r"отчёт (-[0-9]{1,18}) (сегодня|вчера)( ис
 REPORT_CODE = "\nRX · "
 FORBIDDEN = {"Финансы", "Приобретение", "Оплата", "Перевод денег", "Доход", "Расход"}
 UPDATE_TYPES = ["inline_query", "chat_member"]
+HISTORY = re.compile(r"/reports(?:@([a-zA-Z0-9_]+))?(?: ([1-9][0-9]{0,3}))?", re.IGNORECASE)
+HISTORY_PAGE_SIZE = 3
 
 
 def active_member(member):
@@ -33,10 +36,13 @@ class Profile:
 class Group:
     name: str
     profiles: dict[int, Profile]
+    names: dict[int, str]
+    face: str | None
 
 
 def configured_groups(config):
     groups = {}
+    face_ids = set()
     for item in config:
         chat = item["chat"]
         if type(chat) is not int or chat >= 0 or chat in groups:
@@ -47,12 +53,23 @@ def configured_groups(config):
         name = item["name"]
         if not isinstance(name, str) or not name.strip() or len(name) > 80 or name.splitlines() != [name]:
             raise ValueError("invalid group name")
+        face = item.get("face")
+        if face is not None:
+            if not isinstance(face, str) or re.fullmatch(r"[A-Za-z0-9_-]+", face) is None or face in face_ids:
+                raise ValueError("invalid or duplicate group Face")
+            face_ids.add(face)
         profiles = {}
+        names = {}
         for user, profile in item["members"].items():
             practices = []
             user_id = int(user)
             if user_id <= 0 or user_id in profiles:
                 raise ValueError("invalid group member")
+            if (display_name := profile.get("name")) is not None:
+                if (not isinstance(display_name, str) or not display_name.strip() or len(display_name) > 80
+                        or display_name.splitlines() != [display_name]):
+                    raise ValueError("invalid participant name")
+                names[user_id] = display_name
             for entry in profile.get("practices", []):
                 action = entry["action"]
                 label = entry["label"]
@@ -81,18 +98,70 @@ def configured_groups(config):
             if (any((p.action, p.unit) not in shared for p in profile.practices)
                     or (profile.finance and not tracker_profile.finance)):
                 raise ValueError("practice outside the tracker profile")
-        groups[chat] = Group(name, profiles)
+        groups[chat] = Group(name, profiles, names, face)
     return groups
 
 
 class GroupTelegram:
-    def __init__(self, telegram, account, db, groups, ledger):
+    def __init__(self, telegram, account, db, groups, ledger, faces=None):
         self.telegram = telegram
         self.bot_id = account["id"]
         self.username = account["username"].casefold()
         self.journal = ReportJournal(db)
         self.groups = groups
         self.ledger = ledger
+        self.faces = faces or {}
+        self.pending_faces = set(self.faces)
+        self.face_retry_at = 0
+
+    def sync_group_faces(self):
+        now = time.monotonic()
+        if not self.pending_faces or now < self.face_retry_at:
+            return
+        self.face_retry_at = now + 60
+        for chat in sorted(self.pending_faces):
+            try:
+                rows = group_face_rows(self.journal.latest_by_day(chat), self.groups[chat].names)
+                self.faces[chat].sync(rows)
+            except ProviderError as error:
+                logging.warning("Выгрузка группового отчёта: %s", error)
+            else:
+                self.pending_faces.remove(chat)
+
+    def private_history(self, message):
+        if message.get("chat", {}).get("type") != "private":
+            return False
+        match = HISTORY.fullmatch(message.get("text", ""))
+        if not match or (match[1] and match[1].casefold() != self.username):
+            return False
+        user = message.get("from", {}).get("id")
+        if type(user) is not int or user <= 0 or user != message["chat"]["id"]:
+            return True
+        page = int(match[2] or 1)
+        offset = (page - 1) * HISTORY_PAGE_SIZE
+        visible = False
+        more = False
+        for chat, group in self.groups.items():
+            if user not in group.profiles or self.journal.joined(chat, user) is None:
+                continue
+            try:
+                current = active_member(self.telegram.api("getChatMember", {"chat_id": chat, "user_id": user}))
+            except ProviderError as error:
+                logging.warning("История группы RX: %s", error)
+                continue
+            if not current:
+                continue
+            history = self.journal.recent_history(chat, user, HISTORY_PAGE_SIZE + 1, offset)
+            more = more or len(history) > HISTORY_PAGE_SIZE
+            for author, _, text, _ in history[:HISTORY_PAGE_SIZE]:
+                visible = True
+                name = group.names.get(author) or "Участник"
+                self.telegram.message(user, f"{group.name} · {name}\n{text}")
+        if not visible:
+            self.telegram.message(user, "За эту страницу нет доступных групповых отчётов.")
+        elif more and page < 9999:
+            self.telegram.message(user, f"Следующая страница — /reports {page + 1}")
+        return True
 
     def verify_groups(self):
         for chat in self.groups:
@@ -146,6 +215,8 @@ class GroupTelegram:
         result = self.journal.confirm(token, Publication(chat, user, message["message_id"], message["date"],
                                                          via, snapshot), self.bot_id)
         if result == "accepted":
+            if chat in self.faces:
+                self.pending_faces.add(chat)
             issued_date = re.search(r"Отчёт за (\d{2}\.\d{2}\.\d{4})", snapshot).group(1)
             posted = dt.datetime.fromtimestamp(message["date"], MOSCOW).strftime("%d.%m.%Y")
             self.telegram.api("sendMessage", {

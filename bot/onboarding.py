@@ -21,10 +21,18 @@ PILOT_REQUIRED = (*OAUTH_KEYS, "TRACKER_PILOT_REGISTRY_ID")
 
 
 def oauth_session(client_id, client_secret, refresh_token):
+    from google.auth.exceptions import GoogleAuthError
     from google.auth.transport.requests import AuthorizedSession
     from google.oauth2.credentials import Credentials
 
-    return AuthorizedSession(Credentials(
+    class PilotOAuthSession(AuthorizedSession):
+        def request(self, *args, **kwargs):
+            try:
+                return super().request(*args, **kwargs)
+            except GoogleAuthError:
+                raise ProviderError("Google OAuth", "authorization unavailable") from None
+
+    return PilotOAuthSession(Credentials(
         token=None, refresh_token=refresh_token, client_id=client_id, client_secret=client_secret,
         token_uri="https://oauth2.googleapis.com/token", scopes=[OAUTH_SCOPE],
     ))
