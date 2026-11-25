@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 
+from .group_telegram import UPDATE_TYPES, GroupTelegram, configured_groups
 from .ledger import (
     Clarification, INBOX_HEADERS, MOSCOW, PLAN_SCHEMA, ledger_rows, sheets_timestamp, summarize_query,
 )
@@ -46,6 +47,7 @@ class Bot:
         self.directory = directory
         self.owner = owner
         self.provisioner = provisioner
+        self.groups = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -68,10 +70,11 @@ class Bot:
 
     def run(self):
         first_poll = True
+        update_types = ["message"] + (UPDATE_TYPES if self.groups is not None else [])
         while True:
             try:
                 updates = self.telegram.api("getUpdates", {
-                    "offset": self.get("offset", 0), "timeout": 25, "allowed_updates": ["message"],
+                    "offset": self.get("offset", 0), "timeout": 25, "allowed_updates": update_types,
                 })
                 if first_poll:
                     logging.info("Telegram API: опрос обновлений подтверждён")
@@ -83,6 +86,13 @@ class Bot:
                     if message.get("chat", {}).get("type") == "private":
                         saved_at = self.db.execute("SELECT received FROM receipts WHERE id = ?", (update_id,)).fetchone()[0]
                         self.dispatch(update_id, message, dt.datetime.fromisoformat(saved_at))
+                    elif self.groups is not None:
+                        try:
+                            self.groups.handle(update)
+                        except ProviderError as error:
+                            if error.provider != "Telegram" or error.status != 400:
+                                raise
+                            logging.warning("Отчёт RX: Telegram отклонил устаревший запрос или сообщение")
                     with self.db:
                         self.db.execute("INSERT OR REPLACE INTO state VALUES ('offset', ?)", (str(update_id + 1),))
                         self.db.execute("DELETE FROM receipts WHERE id = ?", (update_id,))
@@ -92,6 +102,24 @@ class Bot:
             except Exception as error:
                 logging.error("Обработка прервана: %s", type(error).__name__)
                 time.sleep(30)
+
+    def report_sheet(self, user):
+        if user == self.owner:
+            return self.sheets
+        if self.provisioner is None:
+            return None
+        database = self.directory / "participants" / str(user) / "bot.sqlite"
+        if not database.is_file():
+            return None
+        connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            saved = connection.execute("SELECT value FROM state WHERE key = 'files'").fetchone()
+        finally:
+            connection.close()
+        state = json.loads(saved[0]) if saved else None
+        if state and state.get("ready"):
+            return Sheets(state["base"], session=self.provisioner.session)
+        return None
 
     def dispatch(self, update_id, message, received):
         user = message.get("from", {}).get("id")
@@ -273,9 +301,16 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
     pilot = os.environ.get("TRACKER_PILOT") == "1"
+    groups_config = os.environ.get("TRACKER_REPORT_GROUPS")
     owner = os.environ.get("TRACKER_OWNER_ID")
     if telegram_only and pilot:
         raise ProviderError("RX pilot", "incompatible worker modes")
+    if groups_config and not pilot:
+        raise ProviderError("RX pilot", "group reports require pilot mode")
+    try:
+        groups = configured_groups(json.loads(groups_config)) if groups_config else {}
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise ProviderError("RX pilot", "invalid group report configuration") from None
     google_settings = (SCRIPT_SETTINGS if any(os.environ.get(name) for name in SCRIPT_SETTINGS)
                        else ("GOOGLE_SERVICE_ACCOUNT_JSON",))
     required = list(REQUIRED)
@@ -318,7 +353,11 @@ def main():
         account = telegram.api("getMe", {})
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
-        Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner).run()
+        bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
+        if groups:
+            bot.groups = GroupTelegram(telegram, account, bot.db, groups, bot.report_sheet)
+            bot.groups.verify_groups()
+        bot.run()
 
 
 if __name__ == "__main__":
