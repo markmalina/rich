@@ -63,7 +63,9 @@
     "tracking/sheets-bridge.gs": "AGPL-3.0-only",
     "tracking/test_sheets_bridge.cjs": "AGPL-3.0-only",
     "tracking/test_face_sync.cjs": "AGPL-3.0-only",
-    "bot/test_script_sheets.py": "AGPL-3.0-only"
+    "bot/test_script_sheets.py": "AGPL-3.0-only",
+    "bot/onboarding.py": "AGPL-3.0-only",
+    "bot/test_onboarding.py": "AGPL-3.0-only"
   },
   "license_texts": {
     "AGPL-3.0-only": "LICENSES/AGPL-3.0-only.txt",
