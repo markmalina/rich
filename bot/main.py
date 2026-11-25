@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 
+from .event_write import EVENTS, INBOX, EventWrite, EventWrites, inbox_index
 from .group_face import GroupFace
 from .group_telegram import UPDATE_TYPES, GroupTelegram, configured_groups
 from .ledger import (
@@ -21,12 +22,12 @@ from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
-INBOX = "Входящие"
-EVENTS = "События"
 REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_DATA_DIR")
 LEDGER_REQUIRED = ("OPENAI_API_KEY", "TRACKER_SPREADSHEET_ID")
 SCRIPT_SETTINGS = ("TRACKER_APPS_SCRIPT_URL", "TRACKER_APPS_SCRIPT_TOKEN")
 LEDGER_UNAVAILABLE = "Запись в «БАЗУ» пока недоступна. Пришли сообщение заново после её подключения."
+EVENT_UNCONFIRMED = "Входящее сохранено. Запись в «События» ещё проверяю."
+EVENT_EXISTS = "С этим входящим уже связаны записи в «БАЗЕ»."
 
 
 def attachment(message):
@@ -42,7 +43,7 @@ def attachment(message):
 
 
 class Bot:
-    def __init__(self, telegram, sheets, model, directory, owner, provisioner=None):
+    def __init__(self, telegram, sheets, model, directory, owner, provisioner=None, event_writes=None):
         self.telegram = telegram
         self.sheets = sheets
         self.model = model
@@ -55,6 +56,7 @@ class Bot:
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS receipts (id INTEGER PRIMARY KEY, received TEXT NOT NULL)")
         self.db.commit()
+        self.event_writes = event_writes if event_writes is not None else EventWrites(self.db)
 
     def get(self, key, default=None):
         row = self.db.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
@@ -77,8 +79,10 @@ class Bot:
             try:
                 if self.groups is not None:
                     self.groups.sync_group_faces()
+                offset = self.get("offset", 0)
+                self.reconcile_events(offset)
                 updates = self.telegram.api("getUpdates", {
-                    "offset": self.get("offset", 0), "timeout": 25, "allowed_updates": update_types,
+                    "offset": offset, "timeout": 25, "allowed_updates": update_types,
                 })
                 if first_poll:
                     logging.info("Telegram API: опрос обновлений подтверждён")
@@ -110,7 +114,7 @@ class Bot:
                 logging.error("Обработка прервана: %s", type(error).__name__)
                 time.sleep(30)
 
-    def report_sheet(self, user):
+    def registered_sheet(self, user):
         if user == self.owner:
             return self.sheets
         if self.provisioner is None:
@@ -137,7 +141,7 @@ class Bot:
         elif self.provisioner is not None:
             directory = self.directory / "participants" / str(user)
             directory.mkdir(parents=True, exist_ok=True)
-            bot = Bot(self.telegram, None, self.model, directory, user)
+            bot = Bot(self.telegram, None, self.model, directory, user, event_writes=self.event_writes)
             try:
                 try:
                     bot.sheets = self.provisioner.provision(bot.get("files"), lambda state: bot.put("files", state))
@@ -149,15 +153,11 @@ class Bot:
             finally:
                 bot.db.close()
 
-    def inbox_index(self, origin):
-        return next((i for i, row in enumerate(self.sheets.read(f"'{INBOX}'!A2:A"), start=2)
-                     if row and row[0] == origin), None)
-
     def capture(self, origin, received, source, text, file_ref):
-        found = self.inbox_index(origin)
+        found = inbox_index(self.sheets, origin)
         if found is None:
             self.sheets.append(f"'{INBOX}'!A:H", [[origin, sheets_timestamp(received), source, text, file_ref, "", "", ""]])
-            found = self.inbox_index(origin)
+            found = inbox_index(self.sheets, origin)
         if found is None:
             raise ProviderError("Google Sheets", "inbox row not confirmed")
         return found
@@ -201,10 +201,15 @@ class Bot:
         idx = self.capture(origin, received, source, text, file_ref)
         cached = self.get("response")
         if cached and cached["update"] == update_id:
+            if confirmed := cached.get("settled_origin"):
+                self.event_writes.finish(chat, confirmed)
             self.telegram.message(chat, cached["text"])
             return
         if cached and cached["update"] != update_id:
             self.put("response", None)
+        if pending := self.event_writes.find(chat, update_id):
+            self.answer_event(pending)
+            return
         if not media and not text:
             self.reply(update_id, chat, "Поддерживаются текст, голосовые и фото или файлы JPG, PNG и WEBP.")
             return
@@ -267,7 +272,13 @@ class Bot:
                     weight_rows = self.sheets.read("'Действия'!I2")
                     rows, fallback = ledger_rows(plan["events"], event_source, event_received, actions,
                                                  weight_rows[0][0] if weight_rows else None)
-                    result = self.save_events(event_source, rows, fallback)
+                    batch = EventWrite(chat, event_source, update_id, self.sheets.spreadsheet_id,
+                                       rows, fallback, keep_question)
+                    if self.event_writes.stage(batch):
+                        self.answer_event(batch)
+                    else:
+                        self.reply(update_id, chat, EVENT_UNCONFIRMED, keep_question)
+                    return
                 case "query":
                     result = summarize_query(self.sheets.read(f"'{EVENTS}'!A2:O"), actions, plan["query"], sent.date())
                 case "clarify":
@@ -280,25 +291,52 @@ class Bot:
         else:
             self.reply(update_id, chat, result, keep_question)
 
-    def save_events(self, origin, rows, fallback):
-        lookup = self.inbox_index(origin)
-        if lookup is None:
-            raise ProviderError("Google Sheets", "source missing")
-        previous = [row for row in self.sheets.read(f"'{EVENTS}'!I2:L") if row and row[0] == origin]
-        if previous:
-            return "События из этого сообщения уже сохранены в «БАЗЕ»."
-        self.sheets.update(f"'{INBOX}'!G{lookup}", [[fallback]])
-        count = self.sheets.append(f"'{EVENTS}'!A:O", rows)
-        if count != len(rows):
-            raise ProviderError("Google Sheets", "unexpected number of rows")
+    @staticmethod
+    def event_confirmation(rows):
         details = [f"{row[2]} · {row[4]} {row[5]}" if row[3] in MONEY_ACTIONS else row[2] for row in rows]
         return "\n".join(["Записал в «БАЗУ».", *dict.fromkeys(details)])[:3800]
 
-    def reply(self, update, chat, text, question=None):
+    def verify_event(self, batch, sheets):
+        try:
+            return self.event_writes.advance(batch, sheets)
+        except ProviderError as error:
+            logging.warning("Проверка записи RX: %s", error)
+            return None
+
+    def answer_event(self, batch):
+        result = self.verify_event(batch, self.sheets)
+        text = EVENT_UNCONFIRMED
+        if result == "verified":
+            text = self.event_confirmation(batch.rows)
+        elif result == "existing":
+            text = EVENT_EXISTS
+        self.reply(batch.update_id, batch.user, text, batch.question, settled_origin=batch.origin if result else None)
+
+    def reconcile_events(self, offset):
+        now = int(time.time())
+        for batch in self.event_writes.due(offset, now):
+            self.event_writes.postpone(batch, now + 120)
+            sheets = self.registered_sheet(batch.user)
+            if sheets is None:
+                continue
+            result = self.verify_event(batch, sheets)
+            if result:
+                text = self.event_confirmation(batch.rows) if result == "verified" else EVENT_EXISTS
+                try:
+                    self.telegram.message(batch.user, text)
+                except ProviderError as error:
+                    logging.warning("Подтверждение записи RX: %s", error)
+                else:
+                    self.event_writes.finish(batch.user, batch.origin)
+
+    def reply(self, update, chat, text, question=None, *, settled_origin=None):
         with self.db:
             self.db.executemany("INSERT OR REPLACE INTO state VALUES (?, ?)", [
-                ("question", json.dumps(question)), ("response", json.dumps({"update": update, "text": text})),
+                ("question", json.dumps(question)),
+                ("response", json.dumps({"update": update, "text": text, "settled_origin": settled_origin})),
             ])
+        if settled_origin is not None:
+            self.event_writes.finish(chat, settled_origin)
         self.telegram.message(chat, text)
 
 
@@ -373,7 +411,7 @@ def main():
                                               face_tokens[str(chat)]), chat, group.face)
                 for chat, group in groups.items() if group.face
             }
-            bot.groups = GroupTelegram(telegram, account, bot.db, groups, bot.report_sheet, faces)
+            bot.groups = GroupTelegram(telegram, account, bot.db, groups, bot.registered_sheet, faces)
             bot.groups.verify_groups()
         bot.run()
 

@@ -7,9 +7,11 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+from .event_write import EventWrite
 from .group_reports import build_report
 from .ledger import EVENT_FIELDS, MOSCOW, QUERY_FIELDS, Clarification, action_catalog, ledger_rows, summarize_query
-from .main import Bot, attachment
+from .main import EVENT_UNCONFIRMED, Bot, attachment
+from .providers import ProviderError
 
 NOW = dt.datetime(2026, 11, 23, 14, 5, tzinfo=MOSCOW)
 ACTIONS = {
@@ -102,6 +104,7 @@ class LedgerTest(unittest.TestCase):
 
 class FakeGoogle:
     def __init__(self):
+        self.spreadsheet_id = "test-private-base"
         self.inbox = []
         self.events = []
         self.updates = []
@@ -111,6 +114,8 @@ class FakeGoogle:
             return [[row[0]] for row in self.inbox]
         if area == "'События'!I2:L":
             return [row[8:12] for row in self.events]
+        if area == "'События'!A2:O":
+            return list(self.events)
         if area == "'Действия'!A2:G":
             return list(ACTIONS.values())
         if area in {"'Действия'!I2", "'Правило'!A7:D50"}:
@@ -130,13 +135,15 @@ class ReplayTest(unittest.TestCase):
     def test_retry_keeps_one_inbox_row_and_one_event(self):
         google = FakeGoogle()
         with tempfile.TemporaryDirectory(dir=".") as directory:
-            bot = Bot(None, google, None, Path(directory), 7)
+            bot = Bot(Mock(), google, None, Path(directory), 7)
             try:
-                for _ in range(2):
+                for update in (1, 2):
                     bot.capture("tg-7-9", NOW, "Telegram", "Купил продукты", "")
                     rows, fallback = ledger_rows([event("purchase", amount=42, currency="RUB")],
                                                  "tg-7-9", NOW, ACTIONS, None)
-                    bot.save_events("tg-7-9", rows, fallback)
+                    batch = EventWrite(7, "tg-7-9", update, google.spreadsheet_id, rows, fallback, None)
+                    self.assertTrue(bot.event_writes.stage(batch))
+                    bot.answer_event(batch)
             finally:
                 bot.db.close()
         self.assertEqual(len(google.inbox), 1)
@@ -170,6 +177,94 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(legacy[3], "Перевод денег")
         report = build_report(NOW.date(), google.events, (), finance=True)
         self.assertEqual(report.text.splitlines()[1:], ["Финансы — операций: 2"])
+
+    def set_up_transfer(self, google):
+        model = Mock()
+        model.plan.return_value = {"decision": "record", "continues": False, "message": "", "events": [
+            event("internal_transfer", amount=70, currency="RUB", account="Банк", destination_account="Карман"),
+        ]}
+        message = {"chat": {"id": 7}, "message_id": 99, "date": int(NOW.timestamp()), "text": "Между своими"}
+        return model, message
+
+    def test_accepts_confirmed_batch_if_google_lost_the_append_response(self):
+        google = FakeGoogle()
+        model, message = self.set_up_transfer(google)
+        append = google.append
+
+        def lose_response(area, rows):
+            result = append(area, rows)
+            if "События" in area:
+                raise ProviderError("Apps Script", "connection")
+            return result
+
+        telegram = Mock()
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            bot = Bot(telegram, google, model, Path(directory), 7)
+            try:
+                with patch.object(google, "append", side_effect=lose_response) as request:
+                    bot.handle(50, message, NOW)
+                    bot.handle(50, message, NOW)
+                self.assertIsNone(bot.event_writes.find(7, 50))
+            finally:
+                bot.db.close()
+        sent_batches = [call for call in request.call_args_list if "События" in call.args[0]]
+        self.assertEqual(len(sent_batches), 1)
+        self.assertEqual(len(google.events), 2)
+        self.assertIn("Записал в «БАЗУ».", telegram.message.call_args.args[1])
+
+    def test_late_google_commit_after_restart_is_confirmed_without_sending_a_second_append(self):
+        google = FakeGoogle()
+        model, message = self.set_up_transfer(google)
+        append = google.append
+        delayed = []
+
+        def delay(area, rows):
+            if "События" in area:
+                delayed.extend(rows)
+                raise ProviderError("Apps Script", "connection")
+            return append(area, rows)
+
+        telegram = Mock()
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            with patch.object(google, "append", side_effect=delay) as request:
+                bot = Bot(telegram, google, model, Path(directory), 7)
+                try:
+                    bot.handle(50, message, NOW)
+                finally:
+                    bot.db.close()
+                telegram.message.assert_called_once_with(7, EVENT_UNCONFIRMED)
+                recovered = Bot(telegram, google, model, Path(directory), 7)
+                try:
+                    google.events.extend(delayed[:1])
+                    with patch("bot.main.time.time", return_value=100):
+                        recovered.reconcile_events(51)
+                    telegram.message.assert_called_once()
+                    self.assertTrue(recovered.event_writes.find(7, 50).sent)
+                    google.events.extend(delayed[1:])
+                    with patch("bot.main.time.time", return_value=280):
+                        recovered.reconcile_events(51)
+                    self.assertIsNone(recovered.event_writes.find(7, 50))
+                finally:
+                    recovered.db.close()
+        self.assertEqual(len([call for call in request.call_args_list if "События" in call.args[0]]), 1)
+        self.assertEqual(len(google.events), 2)
+        self.assertIn("Записал в «БАЗУ».", telegram.message.call_args.args[1])
+        model.plan.assert_called_once()
+
+    def test_pending_write_cannot_follow_an_owner_to_a_different_workbook(self):
+        google = FakeGoogle()
+        other = FakeGoogle()
+        other.spreadsheet_id = "another-private-base"
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            bot = Bot(Mock(), google, None, Path(directory), 7)
+            try:
+                batch = EventWrite(7, "tg-7-9", 50, google.spreadsheet_id, [], "", None)
+                bot.event_writes.stage(batch)
+                with self.assertRaisesRegex(ProviderError, "назначение изменилось"):
+                    bot.event_writes.advance(batch, other)
+            finally:
+                bot.db.close()
+        self.assertEqual(other.events, [])
 
 
 class TelegramOnlyTest(unittest.TestCase):
