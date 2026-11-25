@@ -101,6 +101,16 @@ def configured_groups(config):
     return groups
 
 
+def verify_group_chats(telegram, bot_id, groups):
+    for chat in groups:
+        state = telegram.api("getChat", {"chat_id": chat})
+        member = telegram.api("getChatMember", {"chat_id": chat, "user_id": bot_id})
+        if (state["type"] != "supergroup" or state.get("username") or state.get("active_usernames")
+                or state.get("has_visible_history") or state.get("is_forum")
+                or member["status"] != "administrator"):
+            raise ProviderError("RX pilot", "reports require a private supergroup with hidden history")
+
+
 class GroupTelegram:
     def __init__(self, telegram, account, db, groups, ledger, faces=None):
         self.telegram = telegram
@@ -163,13 +173,7 @@ class GroupTelegram:
         return True
 
     def verify_groups(self):
-        for chat in self.groups:
-            state = self.telegram.api("getChat", {"chat_id": chat})
-            member = self.telegram.api("getChatMember", {"chat_id": chat, "user_id": self.bot_id})
-            if (state["type"] != "supergroup" or state.get("username") or state.get("active_usernames")
-                    or state.get("has_visible_history") or state.get("is_forum")
-                    or member["status"] != "administrator"):
-                raise ProviderError("RX pilot", "reports require a private supergroup with hidden history")
+        verify_group_chats(self.telegram, self.bot_id, self.groups)
 
     def handle(self, update):
         if query := update.get("inline_query"):

@@ -12,19 +12,22 @@ import time
 
 from .event_write import EVENTS, INBOX, EventWrite, EventWrites, inbox_index
 from .group_face import GroupFace
-from .group_telegram import UPDATE_TYPES, GroupTelegram, configured_groups
+from .group_telegram import UPDATE_TYPES, GroupTelegram
 from .ledger import (
     Clarification, INBOX_HEADERS, MONEY_ACTIONS, MOSCOW, PLAN_SCHEMA, action_catalog, ledger_rows, sheets_timestamp,
     summarize_query,
 )
-from .onboarding import OAUTH_KEYS, PILOT_REQUIRED, PilotProvisioner, oauth_session
+from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
+from .pilot_check import (
+    BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, legacy_google_settings, report_config,
+    verify_telegram,
+)
 from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_DATA_DIR")
 LEDGER_REQUIRED = ("OPENAI_API_KEY", "TRACKER_SPREADSHEET_ID")
-SCRIPT_SETTINGS = ("TRACKER_APPS_SCRIPT_URL", "TRACKER_APPS_SCRIPT_TOKEN")
 LEDGER_UNAVAILABLE = "Запись в «БАЗУ» пока недоступна. Пришли сообщение заново после её подключения."
 EVENT_UNCONFIRMED = "Входящее сохранено. Запись в «События» ещё проверяю."
 EVENT_EXISTS = "С этим входящим уже связаны записи в «БАЗЕ»."
@@ -346,27 +349,16 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
     pilot = os.environ.get("TRACKER_PILOT") == "1"
-    groups_config = os.environ.get("TRACKER_REPORT_GROUPS")
-    face_tokens_config = os.environ.get("TRACKER_REPORT_FACE_TOKENS")
     owner = os.environ.get("TRACKER_OWNER_ID")
     if telegram_only and pilot:
         raise ProviderError("RX pilot", "incompatible worker modes")
-    if groups_config and not pilot:
+    if os.environ.get("TRACKER_REPORT_GROUPS") and not pilot:
         raise ProviderError("RX pilot", "group reports require pilot mode")
-    try:
-        groups = configured_groups(json.loads(groups_config)) if groups_config else {}
-        face_tokens = json.loads(face_tokens_config) if face_tokens_config else {}
-        face_chats = {str(chat) for chat, group in groups.items() if group.face}
-        if (not isinstance(face_tokens, dict) or set(face_tokens) != face_chats
-                or any(not isinstance(value, str) or not value.strip() for value in face_tokens.values())):
-            raise ValueError("missing or invalid group Face credentials")
-    except (ValueError, TypeError, KeyError, AttributeError):
-        raise ProviderError("RX pilot", "invalid group report configuration") from None
-    google_settings = (SCRIPT_SETTINGS if any(os.environ.get(name) for name in SCRIPT_SETTINGS)
-                       else ("GOOGLE_SERVICE_ACCOUNT_JSON",))
+    groups, face_tokens = report_config(os.environ)
+    google_settings = legacy_google_settings(os.environ)
     required = list(REQUIRED)
     if pilot:
-        required.extend((*PILOT_REQUIRED, "OPENAI_API_KEY"))
+        required.extend((*PILOT_CONFIG_REQUIRED, "OPENAI_API_KEY"))
     else:
         required.append("TRACKER_OWNER_ID")
     if not telegram_only and (owner or not pilot):
@@ -384,6 +376,8 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         session = requests.Session()
         telegram = Telegram(session, os.environ["TELEGRAM_BOT_TOKEN"])
+        if pilot:
+            account = verify_telegram(telegram, os.environ[BOT_USERNAME], inline=bool(groups))
         sheets = None
         model = None
         provisioner = None
@@ -393,6 +387,7 @@ def main():
         if pilot:
             provisioner = PilotProvisioner(oauth_session(*(os.environ[name] for name in OAUTH_KEYS)),
                                            os.environ["TRACKER_PILOT_REGISTRY_ID"])
+            provisioner.verify_registry(os.environ[GOOGLE_EMAIL])
         if owner and not telegram_only:
             spreadsheet = os.environ["TRACKER_SPREADSHEET_ID"]
             if google_settings == SCRIPT_SETTINGS:
@@ -401,7 +396,8 @@ def main():
                 sheets = Sheets(spreadsheet, json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]))
             if sheets.read(f"'{INBOX}'!A1:H1") != [INBOX_HEADERS] or sheets.read(f"'{EVENTS}'!I1") != [["ID входящего"]]:
                 raise ProviderError("Google Sheets", "unsupported ledger schema")
-        account = telegram.api("getMe", {})
+        if not pilot:
+            account = telegram.api("getMe", {})
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
         bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
