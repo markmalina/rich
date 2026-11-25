@@ -72,6 +72,7 @@ class Sheets:
             )
             session = AuthorizedSession(credentials)
         self.session = session
+        self.spreadsheet_id = spreadsheet_id
         self.url = f"{SHEETS_URL}/{quote(spreadsheet_id, safe='')}/values"
 
     def read(self, area):
@@ -81,9 +82,13 @@ class Sheets:
 
     def append(self, area, rows):
         url = f"{self.url}/{quote(area, safe='')}:append"
-        return request(self.session, "Google Sheets", "POST", url,
-                       params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
-                       json={"values": rows}, timeout=30).json()["updates"]["updatedRows"]
+        response = request(self.session, "Google Sheets", "POST", url,
+                           params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+                           json={"values": rows}, timeout=30)
+        try:
+            return response.json()["updates"]["updatedRows"]
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError("Google Sheets", "unconfirmed append response") from None
 
     def update(self, area, values):
         url = f"{self.url}/{quote(area, safe='')}"
