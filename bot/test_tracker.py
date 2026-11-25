@@ -17,6 +17,7 @@ ACTIONS = {
     "Перевод денег": ["Перевод денег", "Финансы"],
     "Благодарность": ["Благодарность", "Отношения"],
     "Яблоко": ["Яблоко", "Приём пищи", "шт.", "", "", "", "Приём пищи"],
+    "Завтрак": ["Завтрак", "Приём пищи", "", "", "", "", "Приём пищи"],
     "Отжимание": ["Отжимание", "Физические упражнения", "повт.", 3.8, "", "", "Физические упражнения"],
     "Расход калорий": ["Расход калорий", "Учёт энергии", "ккал"],
 }
@@ -43,14 +44,26 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaises(Clarification):
             ledger_rows([event("purchase", currency="RUB")], "tg-7-2", NOW, ACTIONS, None)
 
+    def test_food_mass_stays_in_quantity_and_counts_as_one_meal(self):
+        rows, _ = ledger_rows([
+            event("fact", action="Завтрак", quantity=50, unit="г", resource="Каша", body_weight_kg=50),
+        ], "tg-7-5", NOW, ACTIONS, 79)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][3:6], ["Завтрак", 50, "г"])
+        self.assertEqual(rows[0][9], "")
+        self.assertEqual(rows[0][12], "Каша")
+        query = {**dict.fromkeys(QUERY_FIELDS), "category": "Приём пищи"}
+        self.assertIn("50 г", summarize_query(rows, ACTIONS, query, NOW.date()))
+
     def test_exercise_and_query_keep_event_time(self):
         rows, fallback = ledger_rows([
             event("fact", action="Яблоко", quantity=1, time="10:00"),
-            event("activity", action="Отжимание", quantity=15),
-        ], "tg-7-3", NOW, ACTIONS, 79)
+            event("activity", action="Отжимание", quantity=15, body_weight_kg=79),
+        ], "tg-7-3", NOW, ACTIONS, 60)
         self.assertEqual(rows[0][0:2], ["23.11.2026", "10:00:00"])
         self.assertEqual(fallback, "|tg-7-3-e2|")
         self.assertEqual(rows[-1][3:6], ["Расход калорий", -3.9, "ккал"])
+        self.assertEqual(rows[1][9], 79)
         query = {**dict.fromkeys(QUERY_FIELDS), "category": "Приём пищи"}
         text = summarize_query(rows, ACTIONS, query, NOW.date())
         self.assertIn("Яблоко", text)

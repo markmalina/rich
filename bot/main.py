@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import datetime as dt
-import fcntl
 import json
 import logging
 import os
@@ -246,6 +245,8 @@ class Bot:
 
 
 def main():
+    import fcntl
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
     google_settings = (SCRIPT_SETTINGS if any(os.environ.get(name) for name in SCRIPT_SETTINGS)

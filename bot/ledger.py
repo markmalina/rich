@@ -17,7 +17,7 @@ EVENT_FIELDS = {
     "date": "string", "time": "string", "action": "string", "summary": "string",
     "quantity": "number", "unit": "string", "duration": "number", "resource": "string",
     "account": "string", "payment_account": "string", "party": "string", "amount": "number", "currency": "string",
-    "face_text": "string", "met": "number", "weight": "number", "gratitude": "boolean",
+    "face_text": "string", "met": "number", "body_weight_kg": "number", "gratitude": "boolean",
 }
 
 
@@ -110,8 +110,6 @@ def ledger_rows(events, origin, received, actions, default_weight):
             by_message_time.append(event_id)
         units = event["unit"] or value_at(actions.get(event["action"], []), 2)
         duration = met_number(event["duration"])
-        met = met_number(event["met"])
-        weight = met_number(event["weight"])
         summary = event["summary"] or event["action"] or "Событие"
 
         def row(action, quantity, unit, resource, account="", party="", minutes=None, intensity=None,
@@ -157,6 +155,8 @@ def ledger_rows(events, origin, received, actions, default_weight):
         if action in {"Приобретение", "Оплата", "Перевод денег", "Расход калорий"}:
             raise Clarification("Уточни, что произошло и какую сумму или действие нужно учесть.")
         exercise = value_at(actions.get(action, []), 6) == "Физические упражнения"
+        met = met_number(event["met"]) if exercise else None
+        weight = met_number(event["body_weight_kg"]) if exercise else None
         if exercise and duration is None:
             duration = 1
         result.append(row(action, event["quantity"], units, event["resource"], event["account"],
