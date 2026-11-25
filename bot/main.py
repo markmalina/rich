@@ -13,13 +13,14 @@ import time
 from .ledger import (
     Clarification, INBOX_HEADERS, MOSCOW, PLAN_SCHEMA, ledger_rows, sheets_timestamp, summarize_query,
 )
+from .onboarding import OAUTH_KEYS, PILOT_REQUIRED, PilotProvisioner, oauth_session
 from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 INBOX = "Входящие"
 EVENTS = "События"
-REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_OWNER_ID", "TRACKER_DATA_DIR")
+REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_DATA_DIR")
 LEDGER_REQUIRED = ("OPENAI_API_KEY", "TRACKER_SPREADSHEET_ID")
 SCRIPT_SETTINGS = ("TRACKER_APPS_SCRIPT_URL", "TRACKER_APPS_SCRIPT_TOKEN")
 LEDGER_UNAVAILABLE = "Запись в «БАЗУ» пока недоступна. Пришли сообщение заново после её подключения."
@@ -38,12 +39,13 @@ def attachment(message):
 
 
 class Bot:
-    def __init__(self, telegram, sheets, model, directory, owner):
+    def __init__(self, telegram, sheets, model, directory, owner, provisioner=None):
         self.telegram = telegram
         self.sheets = sheets
         self.model = model
         self.directory = directory
         self.owner = owner
+        self.provisioner = provisioner
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -78,9 +80,9 @@ class Bot:
                 for update in updates:
                     update_id = update["update_id"]
                     message = update.get("message", {})
-                    if message.get("chat", {}).get("type") == "private" and message.get("from", {}).get("id") == self.owner:
+                    if message.get("chat", {}).get("type") == "private":
                         saved_at = self.db.execute("SELECT received FROM receipts WHERE id = ?", (update_id,)).fetchone()[0]
-                        self.handle(update_id, message, dt.datetime.fromisoformat(saved_at))
+                        self.dispatch(update_id, message, dt.datetime.fromisoformat(saved_at))
                     with self.db:
                         self.db.execute("INSERT OR REPLACE INTO state VALUES ('offset', ?)", (str(update_id + 1),))
                         self.db.execute("DELETE FROM receipts WHERE id = ?", (update_id,))
@@ -90,6 +92,27 @@ class Bot:
             except Exception as error:
                 logging.error("Обработка прервана: %s", type(error).__name__)
                 time.sleep(30)
+
+    def dispatch(self, update_id, message, received):
+        user = message.get("from", {}).get("id")
+        if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
+            return
+        if user == self.owner:
+            self.handle(update_id, message, received)
+        elif self.provisioner is not None:
+            directory = self.directory / "participants" / str(user)
+            directory.mkdir(parents=True, exist_ok=True)
+            bot = Bot(self.telegram, None, self.model, directory, user)
+            try:
+                try:
+                    bot.sheets = self.provisioner.provision(bot.get("files"), lambda state: bot.put("files", state))
+                except ProviderError as error:
+                    logging.warning("Подключение RX: %s", error)
+                    bot.telegram.message(user, "Подготовка «БАЗЫ» пока не завершилась. Пришли сообщение ещё раз позже.")
+                    return
+                bot.handle(update_id, message, received)
+            finally:
+                bot.db.close()
 
     def inbox_index(self, origin):
         return next((i for i, row in enumerate(self.sheets.read(f"'{INBOX}'!A2:A"), start=2)
@@ -249,9 +272,19 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
+    pilot = os.environ.get("TRACKER_PILOT") == "1"
+    owner = os.environ.get("TRACKER_OWNER_ID")
+    if telegram_only and pilot:
+        raise ProviderError("RX pilot", "incompatible worker modes")
     google_settings = (SCRIPT_SETTINGS if any(os.environ.get(name) for name in SCRIPT_SETTINGS)
                        else ("GOOGLE_SERVICE_ACCOUNT_JSON",))
-    required = REQUIRED if telegram_only else (*REQUIRED, *LEDGER_REQUIRED, *google_settings)
+    required = list(REQUIRED)
+    if pilot:
+        required.extend((*PILOT_REQUIRED, "OPENAI_API_KEY"))
+    else:
+        required.append("TRACKER_OWNER_ID")
+    if not telegram_only and (owner or not pilot):
+        required.extend((*LEDGER_REQUIRED, *google_settings))
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         logging.info("Ожидание настройки: %s", ", ".join(missing))
@@ -267,20 +300,25 @@ def main():
         telegram = Telegram(session, os.environ["TELEGRAM_BOT_TOKEN"])
         sheets = None
         model = None
+        provisioner = None
         if not telegram_only:
+            model = Model(session, os.environ["OPENAI_API_KEY"], os.environ.get("TRACKER_MODEL", "gpt-5.4-mini"),
+                          os.environ.get("TRACKER_TRANSCRIBE_MODEL", "gpt-transcribe"))
+        if pilot:
+            provisioner = PilotProvisioner(oauth_session(*(os.environ[name] for name in OAUTH_KEYS)),
+                                           os.environ["TRACKER_PILOT_REGISTRY_ID"])
+        if owner and not telegram_only:
             spreadsheet = os.environ["TRACKER_SPREADSHEET_ID"]
             if google_settings == SCRIPT_SETTINGS:
                 sheets = ScriptSheets(session, *(os.environ[name] for name in SCRIPT_SETTINGS), spreadsheet)
             else:
                 sheets = Sheets(spreadsheet, json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]))
-            model = Model(session, os.environ["OPENAI_API_KEY"], os.environ.get("TRACKER_MODEL", "gpt-5.4-mini"),
-                          os.environ.get("TRACKER_TRANSCRIBE_MODEL", "gpt-transcribe"))
             if sheets.read(f"'{INBOX}'!A1:H1") != [INBOX_HEADERS] or sheets.read(f"'{EVENTS}'!I1") != [["ID входящего"]]:
                 raise ProviderError("Google Sheets", "unsupported ledger schema")
         account = telegram.api("getMe", {})
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
-        Bot(telegram, sheets, model, data, int(os.environ["TRACKER_OWNER_ID"])).run()
+        Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner).run()
 
 
 if __name__ == "__main__":

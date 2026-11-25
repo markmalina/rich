@@ -62,14 +62,16 @@ class Telegram:
 
 
 class Sheets:
-    def __init__(self, spreadsheet_id, credentials_info):
-        from google.auth.transport.requests import AuthorizedSession
-        from google.oauth2.service_account import Credentials
+    def __init__(self, spreadsheet_id, credentials_info=None, *, session=None):
+        if session is None:
+            from google.auth.transport.requests import AuthorizedSession
+            from google.oauth2.service_account import Credentials
 
-        credentials = Credentials.from_service_account_info(
-            credentials_info, scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
-        self.session = AuthorizedSession(credentials)
+            credentials = Credentials.from_service_account_info(
+                credentials_info, scopes=["https://www.googleapis.com/auth/spreadsheets"],
+            )
+            session = AuthorizedSession(credentials)
+        self.session = session
         self.url = f"{SHEETS_URL}/{quote(spreadsheet_id, safe='')}/values"
 
     def read(self, area):
