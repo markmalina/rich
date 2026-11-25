@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 import re
 
-from .ledger import MOSCOW, as_date, value_at
+from .ledger import FINANCE_ACTIONS, MOSCOW, OUTGOING_ACTIONS, as_date, value_at
 
 
 @dataclass(frozen=True)
@@ -82,8 +82,8 @@ def finance_count(rows):
         if (not isinstance(currency, str) or re.fullmatch(r"[A-Z]{3}", currency) is None
                 or not isinstance(identifier, str) or not identifier or value_at(row, 12) != "Деньги"):
             continue
-        if amount is not None and ((action in {"Оплата", "Расход"} and amount < 0)
-                                   or (action == "Доход" and amount > 0)):
+        if amount is not None and ((action in OUTGOING_ACTIONS and amount < 0)
+                                   or (action == FINANCE_ACTIONS["income"] and amount > 0)):
             operations.add(identifier)
     return len(operations)
 

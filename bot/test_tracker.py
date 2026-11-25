@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from .ledger import EVENT_FIELDS, MOSCOW, QUERY_FIELDS, Clarification, ledger_rows, summarize_query
+from .group_reports import build_report
+from .ledger import EVENT_FIELDS, MOSCOW, QUERY_FIELDS, Clarification, action_catalog, ledger_rows, summarize_query
 from .main import Bot, attachment
 
 NOW = dt.datetime(2026, 11, 23, 14, 5, tzinfo=MOSCOW)
@@ -79,6 +80,20 @@ class LedgerTest(unittest.TestCase):
                 self.assertEqual(rows[1][3:6], ["Благодарность", 1, "ед."])
                 self.assertEqual(rows[0][11], rows[1][11])
 
+    def test_internal_transfer_requires_two_distinct_accounts(self):
+        for destination in (None, " КАРТА "):
+            with self.subTest(destination=destination), self.assertRaisesRegex(Clarification, "счёта"):
+                ledger_rows([event("internal_transfer", amount=100, currency="RUB", account="карта",
+                                   destination_account=destination)], "tg-7-6", NOW, ACTIONS, None)
+
+    def test_old_actions_catalog_preserves_local_settings_and_recognizes_income(self):
+        custom = ["Расход", "Финансы", "BYN"]
+        catalog = action_catalog([*ACTIONS.values(), custom])
+        self.assertEqual(catalog["Расход"], custom)
+        rows, _ = ledger_rows([event("income", amount=100, currency="BYN")], "tg-7-8", NOW, ACTIONS, None)
+        query = {**dict.fromkeys(QUERY_FIELDS), "category": "Финансы"}
+        self.assertIn("Доход · 100 BYN", summarize_query(rows, catalog, query, NOW.date()))
+
     def test_media_formats(self):
         self.assertEqual(attachment({"voice": {"file_id": "v"}})[1], "audio/ogg")
         self.assertEqual(attachment({"photo": [{"file_id": "p"}]})[1], "image/jpeg")
@@ -96,6 +111,10 @@ class FakeGoogle:
             return [[row[0]] for row in self.inbox]
         if area == "'События'!I2:L":
             return [row[8:12] for row in self.events]
+        if area == "'Действия'!A2:G":
+            return list(ACTIONS.values())
+        if area in {"'Действия'!I2", "'Правило'!A7:D50"}:
+            return []
         raise AssertionError(area)
 
     def append(self, area, rows):
@@ -123,6 +142,34 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(len(google.inbox), 1)
         self.assertEqual(len(google.events), 2)
         self.assertEqual(len(google.updates), 1)
+
+    def test_private_message_counts_real_finances_and_keeps_transfer_legs_linked(self):
+        google = FakeGoogle()
+        model = Mock()
+        model.plan.return_value = {"decision": "record", "continues": False, "message": "", "events": [
+            event("income", summary="зарплата", amount=1000, currency="RUB", account="Банк"),
+            event("expense", summary="расчёт", amount=23, currency="RUB", account="Банк", party="Получатель"),
+            event("internal_transfer", amount=70, currency="RUB", account="Банк", destination_account="Карман"),
+            event("transfer", amount=40, currency="RUB", account="Банк"),
+        ]}
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            bot = Bot(Mock(), google, model, Path(directory), 7)
+            try:
+                message = {"chat": {"id": 7}, "message_id": 99, "date": int(NOW.timestamp()), "text": "Операции"}
+                bot.handle(50, message, NOW)
+                bot.handle(50, message, NOW)
+            finally:
+                bot.db.close()
+        self.assertEqual(len(google.inbox), 1)
+        model.plan.assert_called_once()
+        income, expense, debit, credit, legacy = google.events
+        self.assertEqual((income[3:6], expense[3:6]), (["Доход", 1000, "RUB"], ["Расход", -23, "RUB"]))
+        self.assertEqual((debit[4], credit[4]), (-70, 70))
+        self.assertEqual((debit[13], credit[13]), ("Банк", "Карман"))
+        self.assertEqual(debit[11], credit[11])
+        self.assertEqual(legacy[3], "Перевод денег")
+        report = build_report(NOW.date(), google.events, (), finance=True)
+        self.assertEqual(report.text.splitlines()[1:], ["Финансы — операций: 2"])
 
 
 class TelegramOnlyTest(unittest.TestCase):

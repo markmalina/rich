@@ -13,7 +13,8 @@ import time
 from .group_face import GroupFace
 from .group_telegram import UPDATE_TYPES, GroupTelegram, configured_groups
 from .ledger import (
-    Clarification, INBOX_HEADERS, MOSCOW, PLAN_SCHEMA, ledger_rows, sheets_timestamp, summarize_query,
+    Clarification, INBOX_HEADERS, MONEY_ACTIONS, MOSCOW, PLAN_SCHEMA, action_catalog, ledger_rows, sheets_timestamp,
+    summarize_query,
 )
 from .onboarding import OAUTH_KEYS, PILOT_REQUIRED, PilotProvisioner, oauth_session
 from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
@@ -225,7 +226,7 @@ class Bot:
 
         previous = self.get("question")
         action_rows = self.sheets.read("'Действия'!A2:G")
-        actions = {row[0]: row for row in action_rows if row and row[0]}
+        actions = action_catalog(action_rows)
         local_rules = self.sheets.read("'Правило'!A7:D50")
         sent = dt.datetime.fromtimestamp(message["date"], MOSCOW)
         image = (original.read_bytes(), mime) if mime in IMAGE_TYPES else None
@@ -290,7 +291,7 @@ class Bot:
         count = self.sheets.append(f"'{EVENTS}'!A:O", rows)
         if count != len(rows):
             raise ProviderError("Google Sheets", "unexpected number of rows")
-        details = [f"{row[2]} · {row[4]} {row[5]}" if row[3] == "Оплата" else row[2] for row in rows]
+        details = [f"{row[2]} · {row[4]} {row[5]}" if row[3] in MONEY_ACTIONS else row[2] for row in rows]
         return "\n".join(["Записал в «БАЗУ».", *dict.fromkeys(details)])[:3800]
 
     def reply(self, update, chat, text, question=None):

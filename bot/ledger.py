@@ -13,10 +13,22 @@ INBOX_HEADERS = [
     "Расшифровка / распознавание", "ID событий со временем сообщения", "Исходное основание времени",
 ]
 QUERY_FIELDS = {"from_date": "string", "to_date": "string", "category": "string", "action": "string", "search": "string"}
+FINANCE_ACTIONS = {
+    "income": "Доход",
+    "expense": "Расход",
+    "internal_transfer": "Перевод между своими счетами",
+    "transfer": "Перевод денег",
+}
+PURCHASE_ACTION = "Приобретение"
+PAYMENT_ACTION = "Оплата"
+FINANCIAL_LABELS = {"Финансы", PURCHASE_ACTION, PAYMENT_ACTION, *FINANCE_ACTIONS.values()}
+OUTGOING_ACTIONS = {PAYMENT_ACTION, FINANCE_ACTIONS["expense"]}
+MONEY_ACTIONS = {PAYMENT_ACTION, *FINANCE_ACTIONS.values()}
 EVENT_FIELDS = {
     "date": "string", "time": "string", "action": "string", "summary": "string",
     "quantity": "number", "unit": "string", "duration": "number", "resource": "string",
-    "account": "string", "payment_account": "string", "party": "string", "amount": "number", "currency": "string",
+    "account": "string", "payment_account": "string", "destination_account": "string",
+    "party": "string", "amount": "number", "currency": "string",
     "face_text": "string", "met": "number", "body_weight_kg": "number", "gratitude": "boolean",
 }
 
@@ -38,7 +50,7 @@ PLAN_SCHEMA = strict_object({
     "message": {"type": "string"},
     "extracted": {"type": ["string", "null"]},
     "events": {"type": "array", "items": strict_object({
-        "kind": {"type": "string", "enum": ["activity", "purchase", "transfer", "fact"]},
+        "kind": {"type": "string", "enum": ["activity", "purchase", "fact", *FINANCE_ACTIONS]},
         **optional_fields(EVENT_FIELDS),
     })},
     "query": strict_object(optional_fields(QUERY_FIELDS)),
@@ -91,6 +103,13 @@ def value_at(row, index, default=""):
     return row[index] if len(row) > index else default
 
 
+def action_catalog(rows):
+    actions = {row[0]: row for row in rows if row and row[0]}
+    for action in FINANCE_ACTIONS.values():
+        actions.setdefault(action, [action, "Финансы", "", "", "", "", "Финансы"])
+    return actions
+
+
 def met_number(value):
     try:
         result = float(str(value).replace(",", "."))
@@ -114,7 +133,7 @@ def ledger_rows(events, origin, received, actions, default_weight):
 
         def row(action, quantity, unit, resource, account="", party="", minutes=None, intensity=None,
                 body_weight=None, face="", description=summary):
-            if action not in actions:
+            if action not in actions and action not in FINANCE_ACTIONS.values():
                 raise Clarification(f"Какое действие из справочника использовать для записи «{description}»?")
             return [
                 (SHEETS_EPOCH + dt.timedelta(days=day)).strftime("%d.%m.%Y"),
@@ -125,26 +144,41 @@ def ledger_rows(events, origin, received, actions, default_weight):
             ]
 
         kind = event["kind"]
-        if kind in {"purchase", "transfer"}:
-            amount = met_number(event["amount"])
+        if kind == "purchase" or kind in FINANCE_ACTIONS:
+            amount = event["amount"]
             currency = event["currency"] or ""
-            if not amount:
+            if type(amount) not in (int, float) or met_number(amount) is None:
                 raise Clarification("Какая была итоговая сумма?")
             if len(currency) != 3 or not currency.isascii() or not currency.isalpha() or currency != currency.upper():
                 raise Clarification("В какой валюте была сумма?")
             if kind == "purchase":
                 resource = event["resource"] or "Покупка"
-                total = format(Decimal(str(event["amount"])), "f")
+                total = format(Decimal(str(amount)), "f")
                 purchase_label = f"{summary} · итог {total} {currency}"
-                result.append(row("Приобретение", event["quantity"] or 1, event["unit"] or "шт.",
+                result.append(row(PURCHASE_ACTION, event["quantity"] or 1, event["unit"] or "шт.",
                                   resource, event["account"] or "", event["party"], duration or 1,
                                   description=purchase_label))
-                result.append(row("Оплата", -abs(event["amount"]), currency, "Деньги", event["payment_account"],
+                result.append(row(PAYMENT_ACTION, -amount, currency, "Деньги", event["payment_account"],
                                   event["party"], duration or 1, description="Оплата покупки"))
+            elif kind == "internal_transfer":
+                sender = (event["account"] or "").strip()
+                recipient = (event.get("destination_account") or "").strip()
+                if not sender or not recipient or sender.casefold() == recipient.casefold():
+                    raise Clarification("С какого своего счёта и на какой свой счёт переведены деньги?")
+                action = FINANCE_ACTIONS[kind]
+                result.extend([
+                    row(action, -amount, currency, "Деньги", sender, minutes=duration,
+                        description=f"{action} · списание с {sender}"),
+                    row(action, amount, currency, "Деньги", recipient,
+                        description=f"{action} · поступление на {recipient}"),
+                ])
             else:
-                result.append(row("Перевод денег", -abs(event["amount"]), currency, "Деньги",
-                                  event["account"], event["party"], duration))
-                if event["gratitude"]:
+                action = FINANCE_ACTIONS[kind]
+                description = summary if summary != "Событие" else action
+                signed = amount if kind == "income" else -amount
+                result.append(row(action, signed, currency, "Деньги", event["account"], event["party"], duration,
+                                  description=description))
+                if event["gratitude"] and kind in {"expense", "transfer"}:
                     result.append(row("Благодарность", 1, "ед.", "Благодарность", party=event["party"],
                                       description="Получена благодарность"))
             continue
@@ -152,7 +186,7 @@ def ledger_rows(events, origin, received, actions, default_weight):
         action = event["action"]
         if not action:
             raise Clarification("Какое действие записать?")
-        if action in {"Приобретение", "Оплата", "Перевод денег", "Расход калорий"}:
+        if action in FINANCIAL_LABELS or action == "Расход калорий":
             raise Clarification("Уточни, что произошло и какую сумму или действие нужно учесть.")
         exercise = value_at(actions.get(action, []), 6) == "Физические упражнения"
         met = met_number(event["met"]) if exercise else None

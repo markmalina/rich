@@ -3,7 +3,7 @@
 
 import unittest
 
-from bot.ledger import INBOX_HEADERS
+from bot.ledger import FINANCE_ACTIONS, INBOX_HEADERS
 
 from .bootstrap import setup_requests, workbook
 
@@ -21,6 +21,9 @@ class BootstrapTest(unittest.TestCase):
         self.assertTrue(sheets["Экспорт Faces"]["properties"]["hidden"])
         self.assertEqual(sheets["Экспорт Faces"]["data"][0]["rowData"][0],
                          workbook("Витрина", face=True)["sheets"][0]["data"][0]["rowData"][0])
+        actions = sheets["Действия"]["data"][0]["rowData"]
+        labels = {item["values"][0].get("userEnteredValue", {}).get("stringValue") for item in actions}
+        self.assertTrue(set(FINANCE_ACTIONS.values()) <= labels)
 
     def test_setup_reuses_blank_tab_and_preserves_formula_types(self):
         base = workbook("БАЗА", default_sheet_id=2)
