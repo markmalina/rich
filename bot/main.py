@@ -25,6 +25,7 @@ from .pilot_check import (
     verify_telegram,
 )
 from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
+from .sales import Sales
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
@@ -478,7 +479,8 @@ def main():
         if os.environ.get("TRACKER_SCHOOL") == "1":
             seller = (os.environ.get("TRACKER_PILOT_SELLER", "").strip()
                       if os.environ.get("TRACKER_COMMERCIAL_OPEN") == "1" else None)
-            bot.pilot_orders = Pilot(bot.db, telegram, bot.owner, live_seller=seller)
+            pilot_class = Sales if os.environ.get("TRACKER_FULFILLMENT") == "1" else Pilot
+            bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller)
         if groups:
             try:
                 if not account.get("supports_inline_queries"):
