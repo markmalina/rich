@@ -158,12 +158,18 @@ class Model:
         self.transcribe_model = transcribe_model
 
     def transcribe(self, name, data, mime):
-        response = request(
+        result = request(
             self.session, "OpenAI transcription", "POST", f"{OPENAI_URL}/audio/transcriptions",
             headers=self.headers, data={"model": self.transcribe_model},
             files={"file": (name, data, mime)}, timeout=100,
-        ).json()
-        return response["text"]
+        )
+        try:
+            text = result.json()["text"]
+        except (ValueError, KeyError, TypeError):
+            raise ProviderError("OpenAI transcription", "invalid response") from None
+        if not isinstance(text, str) or not text.strip():
+            raise ProviderError("OpenAI transcription", "invalid response")
+        return text
 
     def plan(self, instructions, payload, schema, image=None):
         content = [{"type": "input_text", "text": json.dumps(payload, ensure_ascii=False)}]
@@ -171,17 +177,29 @@ class Model:
             data, mime = image
             url = f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
             content.append({"type": "input_image", "image_url": url, "detail": "high"})
-        response = request(
+        result = request(
             self.session, "OpenAI", "POST", f"{OPENAI_URL}/responses", timeout=100,
             headers=self.headers, json={
                 "model": self.model, "store": False, "instructions": instructions,
                 "input": [{"role": "user", "content": content}],
                 "text": {"format": {"type": "json_schema", "name": "tracker_plan", "schema": schema, "strict": True}},
             },
-        ).json()
+        )
+        try:
+            response = result.json()
+        except ValueError:
+            raise ProviderError("OpenAI", "invalid response") from None
+        if not isinstance(response, dict):
+            raise ProviderError("OpenAI", "invalid response")
         if response.get("status") == "completed":
             for output in response.get("output", []):
                 for part in output.get("content", []):
                     if part.get("type") == "output_text":
-                        return json.loads(part["text"])
+                        try:
+                            plan = json.loads(part["text"])
+                        except (ValueError, KeyError, TypeError):
+                            raise ProviderError("OpenAI", "invalid response") from None
+                        if not isinstance(plan, dict) or set(plan) != set(schema["properties"]):
+                            raise ProviderError("OpenAI", "invalid response")
+                        return plan
         raise ProviderError("OpenAI", "no plan")

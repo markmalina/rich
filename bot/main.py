@@ -14,8 +14,8 @@ from .event_write import EVENTS, INBOX, EventWrite, EventWrites, inbox_index
 from .group_face import GroupFace
 from .group_telegram import UPDATE_TYPES, GroupTelegram
 from .ledger import (
-    Clarification, INBOX_HEADERS, MONEY_ACTIONS, MOSCOW, PLAN_SCHEMA, action_catalog, ledger_rows, sheets_timestamp,
-    summarize_query,
+    Clarification, INBOX_HEADERS, MONEY_ACTIONS, MOSCOW, PLAN_SCHEMA, TELEGRAM_EVENT, action_catalog,
+    ledger_rows, revised_quantity, sheets_timestamp, summarize_query,
 )
 from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
 from .pilot_check import (
@@ -31,6 +31,13 @@ LEDGER_REQUIRED = ("OPENAI_API_KEY", "TRACKER_SPREADSHEET_ID")
 LEDGER_UNAVAILABLE = "Запись в «БАЗУ» пока недоступна. Пришли сообщение заново после её подключения."
 EVENT_UNCONFIRMED = "Входящее сохранено. Запись в «События» ещё проверяю."
 EVENT_EXISTS = "С этим входящим уже связаны записи в «БАЗЕ»."
+MODEL_UNAVAILABLE = "Входящее сохранено. ИИ сейчас недоступен. Попробуй прислать запись позже или опиши её текстом."
+AMOUNT_INSTRUCTION = re.compile(r"^(?:/amount(?:\s|$)|(?:исправь|поправь|исправление)\b)", re.IGNORECASE)
+AMOUNT_VALUE = re.compile(
+    r"(?:/amount|(?:исправь|поправь|исправление)(?:\s+на)?)\s+"
+    r"(?:(tg-[0-9]+-[0-9]+-e[0-9]+)\s+)?([0-9]{1,12}(?:[.,][0-9]{1,6})?)(?:\s+([\w.]{1,12}))?",
+    re.IGNORECASE,
+)
 
 
 def verify_ledger_schema(sheets):
@@ -230,6 +237,12 @@ class Bot:
         if pending := self.event_writes.find(chat, update_id):
             self.answer_event(pending)
             return
+        if AMOUNT_INSTRUCTION.match(message.get("text", "")):
+            self.correct_quantity(update_id, message, origin, text)
+            return
+        if message.get("document") and not media:
+            self.reply(update_id, chat, "Пришли фото либо файл JPG, PNG или WEBP.", self.get("question"))
+            return
         if not media and not text:
             self.reply(update_id, chat, "Поддерживаются текст, голосовые и фото или файлы JPG, PNG и WEBP.")
             return
@@ -246,7 +259,11 @@ class Bot:
                 raise
         if mime == "audio/ogg":
             existing = self.sheets.read(f"'{INBOX}'!F{idx}")
-            extracted = existing[0][0] if existing else self.model.transcribe(original.name, original.read_bytes(), mime)
+            try:
+                extracted = existing[0][0] if existing else self.model.transcribe(original.name, original.read_bytes(), mime)
+            except ProviderError:
+                self.reply(update_id, chat, MODEL_UNAVAILABLE, self.get("question"))
+                return
             self.sheets.update(f"'{INBOX}'!F{idx}", [[extracted]])
 
         previous = self.get("question")
@@ -268,9 +285,9 @@ class Bot:
                 "previous_question": previous,
             }, PLAN_SCHEMA, image)
         except ProviderError as error:
-            if error.status != "no plan":
-                raise
-            self.reply(update_id, chat, "Входящее сохранено. Уточни текстом, что нужно записать или найти.")
+            response = ("Входящее сохранено. Уточни текстом, что нужно записать или найти."
+                        if error.status == "no plan" else MODEL_UNAVAILABLE)
+            self.reply(update_id, chat, response, previous)
             return
         if image and plan["extracted"]:
             extracted = plan["extracted"]
@@ -313,8 +330,36 @@ class Bot:
 
     @staticmethod
     def event_confirmation(rows):
+        if len(rows) == 1 and TELEGRAM_EVENT.fullmatch(str(rows[0][11])) and not rows[0][11].startswith(rows[0][8] + "-e"):
+            row = rows[0]
+            return f"Исправил в «БАЗЕ». {row[2]} · {row[4]} {row[5]}".rstrip()
         details = [f"{row[2]} · {row[4]} {row[5]}" if row[3] in MONEY_ACTIONS else row[2] for row in rows]
         return "\n".join(["Записал в «БАЗУ».", *dict.fromkeys(details)])[:3800]
+
+    def correct_quantity(self, update_id, message, origin, text):
+        chat = message["chat"]["id"]
+        question = self.get("question")
+        try:
+            if os.environ.get("TRACKER_QUANTITY_CORRECTIONS") != "1":
+                raise Clarification("Правка количества пока недоступна для этой установки.")
+            parsed = AMOUNT_VALUE.fullmatch(text.strip().rstrip("!?"))
+            target = message.get("reply_to_message") or {}
+            target_id = target.get("message_id")
+            if not parsed or target.get("from", {}).get("id") != chat or type(target_id) is not int:
+                raise Clarification("Ответь на своё исходное сообщение. Например, «исправь на 60 г» или /amount 60.")
+            selected, amount, unit = parsed.groups()
+            value = float(amount.replace(",", ".")) if "," in amount or "." in amount else int(amount)
+            row = revised_quantity(self.sheets.read(f"'{EVENTS}'!A2:O"), f"tg-{chat}-{target_id}", origin,
+                                   value, unit, selected)
+            if self.event_writes.pending_event(chat, self.sheets.spreadsheet_id, row[11]):
+                raise Clarification("Предыдущая версия ещё сверяется. Дождись подтверждения и отправь правку снова.")
+            batch = EventWrite(chat, origin, update_id, self.sheets.spreadsheet_id, [row], "", question)
+            if self.event_writes.stage(batch):
+                self.answer_event(batch)
+            else:
+                self.reply(update_id, chat, EVENT_UNCONFIRMED, question)
+        except Clarification as error:
+            self.reply(update_id, chat, str(error), question)
 
     def verify_event(self, batch, sheets):
         try:

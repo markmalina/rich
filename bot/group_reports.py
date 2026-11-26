@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 import re
 
-from .ledger import FINANCE_ACTIONS, MOSCOW, OUTGOING_ACTIONS, as_date, value_at
+from .ledger import FINANCE_ACTIONS, MOSCOW, OUTGOING_ACTIONS, as_date, current_events, value_at
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ def date_on(row):
 
 def build_report(day, rows, practices, *, finance=False, finance_minimum=None):
     """Practice labels and units come from an agreed group profile, never the source rows."""
-    daily = [row for row in rows if date_on(row) == day]
+    daily = [row for row in current_events(rows) if date_on(row) == day]
     lines = [f"Отчёт за {day:%d.%m.%Y}"]
     meets_minimum = True
     for practice in practices:
