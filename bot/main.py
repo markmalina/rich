@@ -19,6 +19,7 @@ from .ledger import (
     ledger_rows, revised_quantity, sheets_timestamp, summarize_query,
 )
 from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
+from .pilot import Pilot
 from .pilot_check import (
     BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, legacy_google_settings, report_config,
     verify_telegram,
@@ -68,6 +69,7 @@ class Bot:
         self.provisioner = provisioner
         self.groups = None
         self.coaching = None
+        self.pilot_orders = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -156,6 +158,8 @@ class Bot:
         if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
             return
         if self.coaching is not None and self.coaching.handle(update_id, user, message, received):
+            return
+        if self.pilot_orders is not None and self.pilot_orders.handle(update_id, user, message, received):
             return
         if user == self.owner:
             self.handle(update_id, message, received)
@@ -471,6 +475,10 @@ def main():
         bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
         if os.environ.get("TRACKER_COACHING") == "1":
             bot.coaching = Coaching(bot.db, telegram, bot.owner)
+        if os.environ.get("TRACKER_SCHOOL") == "1":
+            seller = (os.environ.get("TRACKER_PILOT_SELLER", "").strip()
+                      if os.environ.get("TRACKER_COMMERCIAL_OPEN") == "1" else None)
+            bot.pilot_orders = Pilot(bot.db, telegram, bot.owner, live_seller=seller)
         if groups:
             try:
                 if not account.get("supports_inline_queries"):
