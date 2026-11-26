@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from .onboarding import DRIVE_ABOUT_URL, DRIVE_URL, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
-from .pilot_check import TEST_USERS, check, configured_test_participants, verify_telegram
+from .pilot_check import TEST_USERS, check, configured_test_participants, legacy_owner, verify_telegram
 from .providers import ProviderError
 
 
@@ -39,6 +39,11 @@ class TelegramPreflightTest(unittest.TestCase):
         for invalid in ("", "0", "-10", "10,", "everyone"):
             with self.subTest(value=invalid), self.assertRaisesRegex(ProviderError, TEST_USERS):
                 configured_test_participants({TEST_USERS: invalid})
+
+    def test_standalone_pilot_ignores_inherited_owner(self):
+        env = {"TRACKER_OWNER_ID": "7", "TRACKER_PILOT_STANDALONE": "1"}
+        self.assertEqual(legacy_owner(env), "7")
+        self.assertIsNone(legacy_owner({**env, "TRACKER_PILOT": "1"}))
 
 
 class GooglePreflightTest(unittest.TestCase):

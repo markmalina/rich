@@ -21,6 +21,12 @@ PILOT_CONFIG_REQUIRED = (*PILOT_REQUIRED, BOT_USERNAME, GOOGLE_EMAIL, TEST_USERS
 SCRIPT_SETTINGS = ("TRACKER_APPS_SCRIPT_URL", "TRACKER_APPS_SCRIPT_TOKEN")
 
 
+def legacy_owner(env):
+    if env.get("TRACKER_PILOT") == "1" and env.get("TRACKER_PILOT_STANDALONE") == "1":
+        return None
+    return env.get("TRACKER_OWNER_ID")
+
+
 def configured_test_participants(env):
     values = [value.strip() for value in env[TEST_USERS].split(",")]
     if any(re.fullmatch(r"[1-9][0-9]{0,15}", value) is None for value in values):
@@ -67,7 +73,7 @@ def check(env, forbid=None):
     if env.get("TRACKER_TELEGRAM_ONLY") == "1":
         raise ProviderError("RX pilot", "TRACKER_TELEGRAM_ONLY conflicts with the pilot")
     required = ("TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY", "TRACKER_DATA_DIR", *PILOT_CONFIG_REQUIRED)
-    if env.get("TRACKER_OWNER_ID"):
+    if legacy_owner(env):
         required += ("TRACKER_SPREADSHEET_ID", *legacy_google_settings(env))
     missing = [key for key in required if not env.get(key, "").strip()]
     if missing:

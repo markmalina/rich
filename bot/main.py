@@ -19,8 +19,8 @@ from .ledger import (
 )
 from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
 from .pilot_check import (
-    BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, legacy_google_settings, report_config,
-    configured_test_participants, verify_telegram,
+    BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, configured_test_participants,
+    legacy_google_settings, legacy_owner, report_config, verify_telegram,
 )
 from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
 
@@ -381,7 +381,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
     pilot = os.environ.get("TRACKER_PILOT") == "1"
-    owner = os.environ.get("TRACKER_OWNER_ID")
+    owner = legacy_owner(os.environ)
     if telegram_only and pilot:
         raise ProviderError("RX pilot", "incompatible worker modes")
     if os.environ.get("TRACKER_REPORT_GROUPS") and not pilot:
