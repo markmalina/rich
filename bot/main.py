@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 
+from .coaching import Coaching
 from .event_write import EVENTS, INBOX, EventWrite, EventWrites, inbox_index
 from .group_face import GroupFace
 from .group_telegram import UPDATE_TYPES, GroupTelegram
@@ -66,6 +67,7 @@ class Bot:
         self.owner = owner
         self.provisioner = provisioner
         self.groups = None
+        self.coaching = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -94,6 +96,8 @@ class Bot:
             try:
                 if self.groups is not None:
                     self.groups.sync_group_faces()
+                if self.coaching is not None:
+                    self.coaching.send_due(dt.datetime.now(MOSCOW))
                 offset = self.get("offset", 0)
                 self.reconcile_events(offset)
                 updates = self.telegram.api("getUpdates", {
@@ -150,6 +154,8 @@ class Bot:
     def dispatch(self, update_id, message, received):
         user = message.get("from", {}).get("id")
         if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
+            return
+        if self.coaching is not None and self.coaching.handle(update_id, user, message, received):
             return
         if user == self.owner:
             self.handle(update_id, message, received)
@@ -465,6 +471,8 @@ def main():
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
         bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
+        if os.environ.get("TRACKER_COACHING") == "1":
+            bot.coaching = Coaching(bot.db, telegram, bot.owner)
         if groups:
             faces = {
                 chat: GroupFace(oauth_session(os.environ[OAUTH_KEYS[0]], os.environ[OAUTH_KEYS[1]],
