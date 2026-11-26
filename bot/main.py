@@ -20,7 +20,7 @@ from .ledger import (
 from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
 from .pilot_check import (
     BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, legacy_google_settings, report_config,
-    verify_telegram,
+    configured_test_participants, verify_telegram,
 )
 from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
 
@@ -31,6 +31,14 @@ LEDGER_REQUIRED = ("OPENAI_API_KEY", "TRACKER_SPREADSHEET_ID")
 LEDGER_UNAVAILABLE = "Запись в «БАЗУ» пока недоступна. Пришли сообщение заново после её подключения."
 EVENT_UNCONFIRMED = "Входящее сохранено. Запись в «События» ещё проверяю."
 EVENT_EXISTS = "С этим входящим уже связаны записи в «БАЗЕ»."
+PILOT_TERMS = "s1-v1"
+PILOT_NOTICE = (
+    "Это закрытый тест RX. Используй только вымышленные записи. После /agree бот создаст закрытые "
+    "«БАЗУ» и Face в тестовом Google Drive. RX хранит техническую привязку и присланные после "
+    "согласия оригиналы на диске стенда. Разрешённые тестовые сообщения передаются сервису ИИ "
+    "для разбора. Доступ к служебным данным есть у оператора стенда. Чтобы принять условия, "
+    "отправь /agree. После подключения отправь свою вымышленную запись заново."
+)
 
 
 def attachment(message):
@@ -46,13 +54,15 @@ def attachment(message):
 
 
 class Bot:
-    def __init__(self, telegram, sheets, model, directory, owner, provisioner=None, event_writes=None):
+    def __init__(self, telegram, sheets, model, directory, owner, provisioner=None, event_writes=None, *,
+                 participant_ids=frozenset()):
         self.telegram = telegram
         self.sheets = sheets
         self.model = model
         self.directory = directory
         self.owner = owner
         self.provisioner = provisioner
+        self.participant_ids = participant_ids
         self.groups = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
@@ -95,7 +105,11 @@ class Bot:
                     update_id = update["update_id"]
                     message = update.get("message", {})
                     if message.get("chat", {}).get("type") == "private":
-                        if self.groups is None or not self.groups.private_history(message):
+                        sender = message.get("from", {}).get("id")
+                        can_read_group = sender == self.owner or (
+                            sender in self.participant_ids and self.participant_agreed(sender)
+                        )
+                        if self.groups is None or not can_read_group or not self.groups.private_history(message):
                             saved_at = self.db.execute(
                                 "SELECT received FROM receipts WHERE id = ?", (update_id,),
                             ).fetchone()[0]
@@ -120,7 +134,7 @@ class Bot:
     def registered_sheet(self, user):
         if user == self.owner:
             return self.sheets
-        if self.provisioner is None:
+        if self.provisioner is None or user not in self.participant_ids or not self.participant_agreed(user):
             return None
         database = self.directory / "participants" / str(user) / "bot.sqlite"
         if not database.is_file():
@@ -135,6 +149,10 @@ class Bot:
             return Sheets(state["base"], session=self.provisioner.session)
         return None
 
+    def participant_agreed(self, user):
+        agreement = self.get(f"pilot-agreement:{user}", {})
+        return agreement.get("version") == PILOT_TERMS
+
     def dispatch(self, update_id, message, received):
         user = message.get("from", {}).get("id")
         if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
@@ -142,6 +160,17 @@ class Bot:
         if user == self.owner:
             self.handle(update_id, message, received)
         elif self.provisioner is not None:
+            if user not in self.participant_ids:
+                self.telegram.message(user, "Этот RX открыт для назначенных тестовых участников.")
+                return
+            agrees = message.get("text", "").strip() == "/agree"
+            if not self.participant_agreed(user):
+                notice_key = f"pilot-notice:{user}"
+                if not agrees or self.get(notice_key) != PILOT_TERMS:
+                    self.telegram.message(user, PILOT_NOTICE)
+                    self.put(notice_key, PILOT_TERMS)
+                    return
+                self.put(f"pilot-agreement:{user}", {"version": PILOT_TERMS, "at": received.isoformat()})
             directory = self.directory / "participants" / str(user)
             directory.mkdir(parents=True, exist_ok=True)
             bot = Bot(self.telegram, None, self.model, directory, user, event_writes=self.event_writes)
@@ -152,7 +181,10 @@ class Bot:
                     logging.warning("Подключение RX: %s", error)
                     bot.telegram.message(user, "Подготовка «БАЗЫ» пока не завершилась. Пришли сообщение ещё раз позже.")
                     return
-                bot.handle(update_id, message, received)
+                if agrees:
+                    bot.telegram.message(user, "Закрытый дневник готов. Пришли свою вымышленную запись заново.")
+                else:
+                    bot.handle(update_id, message, received)
             finally:
                 bot.db.close()
 
@@ -370,6 +402,7 @@ def main():
             time.sleep(3600)
     import requests
 
+    participant_ids = configured_test_participants(os.environ) if pilot else frozenset()
     data = Path(os.environ["TRACKER_DATA_DIR"])
     data.mkdir(parents=True, exist_ok=True)
     with (data / "bot.lock").open("a") as lock:
@@ -400,7 +433,8 @@ def main():
             account = telegram.api("getMe", {})
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
-        bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
+        bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner,
+                  participant_ids=participant_ids)
         if groups:
             faces = {
                 chat: GroupFace(oauth_session(os.environ[OAUTH_KEYS[0]], os.environ[OAUTH_KEYS[1]],

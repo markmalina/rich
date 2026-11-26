@@ -63,20 +63,30 @@ class ProvisionerTest(unittest.TestCase):
     def test_resumes_registered_pair_after_an_uncertain_append(self):
         pilot = PilotProvisioner(Mock(), "registry")
         pair = ["my-base", "my-face", 0]
+        state = {}
+        saved = []
         pilot.registry = Mock()
-        pilot.registry.read.side_effect = [[REGISTRY_HEADERS], [REGISTRY_HEADERS, pair]]
+        pilot.registry.read.side_effect = [[REGISTRY_HEADERS], [REGISTRY_HEADERS], [REGISTRY_HEADERS, pair]]
         pilot.registry.append.side_effect = ProviderError("Google pilot", "connection")
+
+        def save(value):
+            saved.append(deepcopy(value))
+
         with self.assertRaises(ProviderError):
-            pilot.register(pair)
-        pilot.register(pair)
+            pilot.register(pair, state, save)
+        recovered = saved[-1]
+        with self.assertRaisesRegex(ProviderError, "previous registry write not confirmed"):
+            pilot.register(pair, recovered, save)
+        pilot.register(pair, recovered, save)
         pilot.registry.append.assert_called_once_with(REGISTRY, [pair])
+        self.assertNotIn("registering", recovered)
 
     def test_rejects_registry_pair_that_shares_a_file_in_another_role(self):
         pilot = PilotProvisioner(Mock(), "registry")
         pilot.registry = Mock()
         pilot.registry.read.return_value = [REGISTRY_HEADERS, ["other-base", "my-base", 0]]
         with self.assertRaisesRegex(ProviderError, "registry pair conflict"):
-            pilot.register(["my-base", "my-face", 0])
+            pilot.register(["my-base", "my-face", 0], {}, Mock())
         pilot.registry.append.assert_not_called()
 
 
@@ -105,15 +115,22 @@ class ParticipantDispatchTest(unittest.TestCase):
 
         provisioner.provision.side_effect = provision
         with tempfile.TemporaryDirectory(dir=".") as directory:
-            bot = Bot(telegram, legacy_sheet, model, Path(directory), 7, provisioner)
+            bot = Bot(telegram, legacy_sheet, model, Path(directory), 7, provisioner, participant_ids={10, 20})
             try:
                 with patch.object(Bot, "handle", autospec=True, side_effect=handle):
-                    for update, user, text in [(1, 10, "first"), (2, 20, "second"),
+                    for update, user, text in [(11, 30, "/agree"), (12, 10, "/agree"),
+                                               (13, 20, "discard this first message")]:
+                        bot.dispatch(update, {"from": {"id": user}, "chat": {"id": user}, "text": text}, now)
+                    self.assertFalse((Path(directory) / "participants").exists())
+                    provisioner.provision.assert_not_called()
+                    self.assertIsNone(bot.registered_sheet(10))
+                    for update, user, text in [(14, 10, "/agree"), (15, 20, "/agree"),
+                                               (1, 10, "first"), (2, 20, "second"),
                                                (3, 10, "next"), (4, 7, "legacy")]:
                         bot.dispatch(update, {"from": {"id": user}, "chat": {"id": user}, "text": text}, now)
                     bot.dispatch(5, {"from": {"id": 20}, "chat": {"id": 10}}, now)
             finally:
                 bot.db.close()
-        self.assertEqual(provisioning_states, [None, None, {"base": 10}])
+        self.assertEqual(provisioning_states, [None, None, {"base": 10}, {"base": 20}, {"base": 10}])
         self.assertEqual(actions, [(1, sheets[10], None, now), (2, sheets[20], None, now),
                                    (3, sheets[10], "first", now), (4, legacy_sheet, None, now)])

@@ -13,7 +13,7 @@ from .group_telegram import GroupTelegram, configured_groups
 from .ledger import MOSCOW
 from .main import Bot
 from .onboarding import DRIVE_URL, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
-from .providers import SHEETS_URL
+from .providers import ProviderError, SHEETS_URL
 from .test_tracker import FakeGoogle, event
 
 CHAT = -1000012345
@@ -180,7 +180,8 @@ class PilotAcceptanceTest(unittest.TestCase):
 
         def start(directory):
             pilot = PilotProvisioner(google.session, "registry")
-            bot = Bot(telegram, existing, model, Path(directory), OWNER, pilot)
+            bot = Bot(telegram, existing, model, Path(directory), OWNER, pilot,
+                      participant_ids={TRACKER, MEMBER})
             bot.groups = GroupTelegram(telegram, {"id": 999, "username": "TestRX"}, bot.db, groups,
                                        bot.registered_sheet, {CHAT: face})
             return bot
@@ -197,8 +198,29 @@ class PilotAcceptanceTest(unittest.TestCase):
               patch("bot.group_telegram.time.time", return_value=STAMP)):
             first = start(directory)
             try:
-                run(first, message(1, TRACKER, "трекер"), message(2, MEMBER, "участник"),
-                    message(3, OWNER, "владелец"))
+                run(first, message(1, TRACKER, "/start"), message(2, MEMBER, "Не сохранять до согласия"))
+                self.assertEqual(google.created, {})
+                model.plan.assert_not_called()
+                run(first, message(100, TRACKER, "/agree"))
+                setup = first.provisioner.setup
+
+                def interrupt_after_base(file_id, title, *, face=False):
+                    setup(file_id, title, face=face)
+                    if not face:
+                        raise ProviderError("Google pilot", "test interruption before registration")
+
+                with patch.object(first.provisioner, "setup", side_effect=interrupt_after_base):
+                    run(first, message(101, MEMBER, "/agree"), message(102, TRACKER, "трекер", message_id=1))
+                self.assertEqual(len(google.created), 4)
+                self.assertIsNone(first.registered_sheet(MEMBER))
+                self.assertEqual(len(google.books["registry"][0].rows), 2)
+            finally:
+                first.db.close()
+
+            first = start(directory)
+            try:
+                run(first,
+                    message(103, MEMBER, "участник", message_id=2), message(104, OWNER, "владелец"))
                 a = first.registered_sheet(TRACKER)
                 b = first.registered_sheet(MEMBER)
                 self.assertNotEqual(a.spreadsheet_id, b.spreadsheet_id)
@@ -219,8 +241,9 @@ class PilotAcceptanceTest(unittest.TestCase):
             try:
                 telegram.members.update({(CHAT, TRACKER), (CHAT, MEMBER)})
                 with patch("bot.group_telegram.time.monotonic", side_effect=iter(range(100, 2000, 100))):
-                    run(restarted, message(4, MEMBER, "участник", message_id=2), membership(5, TRACKER, "member"),
-                        membership(6, MEMBER, "member"), {"update_id": 7, "inline_query": {
+                    run(restarted, message(105, MEMBER, "участник", message_id=2),
+                        membership(106, TRACKER, "member"), membership(107, MEMBER, "member"),
+                        {"update_id": 108, "inline_query": {
                             "id": "preview", "from": {"id": MEMBER}, "chat_type": "supergroup",
                             "query": f"отчёт {CHAT} сегодня",
                         }})
@@ -232,17 +255,17 @@ class PilotAcceptanceTest(unittest.TestCase):
                     for private_value in ("закрытая книга", "личный текст", "частный платёж", "125 RUB"):
                         self.assertNotIn(private_value, text)
                     self.assertEqual(restarted.groups.journal.latest_by_day(CHAT), [])
-                    run(restarted, message(8, MEMBER, text, chat=CHAT-1, via_bot=999),
-                        message(9, MEMBER, text, chat=CHAT, via_bot=999),
-                        message(10, MEMBER, text, chat=CHAT, message_id=9, via_bot=999),
-                        message(11, TRACKER, "/reports"))
+                    run(restarted, message(109, MEMBER, text, chat=CHAT-1, via_bot=999),
+                        message(110, MEMBER, text, chat=CHAT, via_bot=999),
+                        message(111, MEMBER, text, chat=CHAT, message_id=110, via_bot=999),
+                        message(112, TRACKER, "/reports"))
                     history = next(body["text"] for method, body in telegram.calls if method == "sendMessage"
                                    and body["chat_id"] == TRACKER and "Тестовая группа" in body["text"])
                     self.assertIn("Финансы — операций: 1", history)
                     self.assertEqual(len(restarted.groups.journal.latest_by_day(CHAT)), 1)
                     self.assertEqual(len(face.sync.call_args.args[0]), 1)
                     telegram.members.remove((CHAT, TRACKER))
-                    run(restarted, membership(12, TRACKER, "left"), message(13, TRACKER, "/reports"))
+                    run(restarted, membership(113, TRACKER, "left"), message(114, TRACKER, "/reports"))
                     self.assertEqual(telegram.calls[-2][1]["text"], "За эту страницу нет доступных групповых отчётов.")
             finally:
                 restarted.db.close()

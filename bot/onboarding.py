@@ -87,7 +87,7 @@ class PilotProvisioner:
                 base.update("'Faces'!A2:H2", [route])
                 if base.read("'Faces'!A2:H2") != [route]:
                     raise ProviderError("RX pilot", "Face route not confirmed")
-            self.register([base_id, face_id, face_gid])
+            self.register([base_id, face_id, face_gid], state, save)
             state["ready"] = True
             save(state)
         return Sheets(state["base"], session=self.session)
@@ -155,7 +155,7 @@ class PilotProvisioner:
             raise ProviderError("RX pilot", "workbook headers not confirmed")
         return default
 
-    def register(self, pair):
+    def register(self, pair, state, save):
         rows = self.registry.read(REGISTRY)
         if not rows or rows[0] != REGISTRY_HEADERS:
             raise ProviderError("RX pilot", "unsupported registry schema")
@@ -163,9 +163,20 @@ class PilotProvisioner:
         if matches and matches != [pair]:
             raise ProviderError("RX pilot", "registry pair conflict")
         if not matches:
-            self.registry.append(REGISTRY, [pair])
+            if state.get("registering"):
+                raise ProviderError("RX pilot", "previous registry write not confirmed")
+            state["registering"] = True
+            save(state)
+            try:
+                self.registry.append(REGISTRY, [pair])
+            except ProviderError as error:
+                if error.status in {400, 401, 403, 429}:
+                    state.pop("registering")
+                    save(state)
+                raise
             if self.registry.read(REGISTRY).count(pair) != 1:
                 raise ProviderError("RX pilot", "registry write not confirmed")
+        state.pop("registering", None)
 
 
 def init_registry(session, registry_id):

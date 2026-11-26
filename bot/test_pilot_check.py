@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from .onboarding import DRIVE_ABOUT_URL, DRIVE_URL, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
-from .pilot_check import check, verify_telegram
+from .pilot_check import TEST_USERS, check, configured_test_participants, verify_telegram
 from .providers import ProviderError
 
 
@@ -33,6 +33,12 @@ class TelegramPreflightTest(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "reserved for the personal environment"):
             verify_telegram(telegram, "@PersonalExampleBot", forbid="personalexamplebot")
         telegram.api.assert_not_called()
+
+    def test_pilot_allowlist_rejects_invalid_ids(self):
+        self.assertEqual(configured_test_participants({TEST_USERS: "10, 20"}), {10, 20})
+        for invalid in ("", "0", "-10", "10,", "everyone"):
+            with self.subTest(value=invalid), self.assertRaisesRegex(ProviderError, TEST_USERS):
+                configured_test_participants({TEST_USERS: invalid})
 
 
 class GooglePreflightTest(unittest.TestCase):

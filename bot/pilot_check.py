@@ -16,8 +16,16 @@ from .providers import ProviderError, Telegram
 
 BOT_USERNAME = "TRACKER_PILOT_BOT_USERNAME"
 GOOGLE_EMAIL = "TRACKER_PILOT_GOOGLE_EMAIL"
-PILOT_CONFIG_REQUIRED = (*PILOT_REQUIRED, BOT_USERNAME, GOOGLE_EMAIL)
+TEST_USERS = "TRACKER_PILOT_TEST_USERS"
+PILOT_CONFIG_REQUIRED = (*PILOT_REQUIRED, BOT_USERNAME, GOOGLE_EMAIL, TEST_USERS)
 SCRIPT_SETTINGS = ("TRACKER_APPS_SCRIPT_URL", "TRACKER_APPS_SCRIPT_TOKEN")
+
+
+def configured_test_participants(env):
+    values = [value.strip() for value in env[TEST_USERS].split(",")]
+    if any(re.fullmatch(r"[1-9][0-9]{0,15}", value) is None for value in values):
+        raise ProviderError("RX pilot", f"invalid {TEST_USERS}")
+    return frozenset(map(int, values))
 
 
 def legacy_google_settings(env):
@@ -64,6 +72,7 @@ def check(env, forbid=None):
     missing = [key for key in required if not env.get(key, "").strip()]
     if missing:
         raise ProviderError("RX pilot", "missing variables: " + ", ".join(missing))
+    configured_test_participants(env)
     groups, face_tokens = report_config(env)
 
     import requests
