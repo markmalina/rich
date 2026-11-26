@@ -46,6 +46,8 @@
     "bot/pilot.py": "AGPL-3.0-only",
     "bot/school.py": "AGPL-3.0-only",
     "bot/sales.py": "AGPL-3.0-only",
+    "bot/operations.py": "AGPL-3.0-only",
+    "bot/test_operations.py": "AGPL-3.0-only",
     "bot/test_sales.py": "AGPL-3.0-only",
     "bot/test_pilot_orders.py": "AGPL-3.0-only",
     "bot/providers.py": "AGPL-3.0-only",
