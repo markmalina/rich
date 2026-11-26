@@ -491,7 +491,10 @@ def main():
             pilot_class = Sales if os.environ.get("TRACKER_FULFILLMENT") == "1" else Pilot
             bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller)
         if os.environ.get("TRACKER_OPERATIONS") == "1":
-            bot.operations = Operations(bot.db, telegram, bot.owner, data)
+            try:
+                bot.operations = Operations(bot.db, telegram, bot.owner, data)
+            except (OSError, sqlite3.Error) as error:
+                logging.warning("Эксплуатационные команды недоступны: %s", type(error).__name__)
         if groups:
             try:
                 if not account.get("supports_inline_queries"):
