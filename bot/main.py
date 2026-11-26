@@ -422,8 +422,6 @@ def main():
     owner = os.environ.get("TRACKER_OWNER_ID")
     if telegram_only and pilot:
         raise ProviderError("RX pilot", "incompatible worker modes")
-    if os.environ.get("TRACKER_REPORT_GROUPS") and not pilot:
-        raise ProviderError("RX pilot", "group reports require pilot mode")
     groups, face_tokens = report_config(os.environ)
     google_settings = legacy_google_settings(os.environ)
     required = list(REQUIRED)
@@ -447,7 +445,7 @@ def main():
         session = requests.Session()
         telegram = Telegram(session, os.environ["TELEGRAM_BOT_TOKEN"])
         if pilot:
-            account = verify_telegram(telegram, os.environ[BOT_USERNAME], inline=bool(groups))
+            account = verify_telegram(telegram, os.environ[BOT_USERNAME])
         sheets = None
         model = None
         provisioner = None
@@ -474,13 +472,21 @@ def main():
         if os.environ.get("TRACKER_COACHING") == "1":
             bot.coaching = Coaching(bot.db, telegram, bot.owner)
         if groups:
-            faces = {
-                chat: GroupFace(oauth_session(os.environ[OAUTH_KEYS[0]], os.environ[OAUTH_KEYS[1]],
-                                              face_tokens[str(chat)]), chat, group.face)
-                for chat, group in groups.items() if group.face
-            }
-            bot.groups = GroupTelegram(telegram, account, bot.db, groups, bot.registered_sheet, faces)
-            bot.groups.verify_groups()
+            try:
+                if not account.get("supports_inline_queries"):
+                    raise ProviderError("RX", "для групповых отчётов требуется inline")
+                if face_tokens and not all(os.environ.get(name) for name in OAUTH_KEYS[:2]):
+                    raise ProviderError("RX", "не настроен OAuth группового Face")
+                faces = {
+                    chat: GroupFace(oauth_session(os.environ[OAUTH_KEYS[0]], os.environ[OAUTH_KEYS[1]],
+                                                  face_tokens[str(chat)]), chat, group.face)
+                    for chat, group in groups.items() if group.face
+                }
+                grouped = GroupTelegram(telegram, account, bot.db, groups, bot.registered_sheet, faces)
+                grouped.verify_groups()
+                bot.groups = grouped
+            except ProviderError as error:
+                logging.warning("Групповые отчёты недоступны: %s", error)
         bot.run()
 
 
