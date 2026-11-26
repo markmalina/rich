@@ -19,6 +19,7 @@ from .ledger import (
     ledger_rows, revised_quantity, sheets_timestamp, summarize_query,
 )
 from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
+from .operations import Operations
 from .pilot import Pilot
 from .pilot_check import (
     BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, legacy_google_settings, report_config,
@@ -71,6 +72,7 @@ class Bot:
         self.groups = None
         self.coaching = None
         self.pilot_orders = None
+        self.operations = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -101,6 +103,11 @@ class Bot:
                     self.groups.sync_group_faces()
                 if self.coaching is not None:
                     self.coaching.send_due(dt.datetime.now(MOSCOW))
+                if self.operations is not None:
+                    try:
+                        self.operations.run_daily(dt.datetime.now(MOSCOW))
+                    except (OSError, sqlite3.Error, RuntimeError) as error:
+                        logging.warning("Локальная резервная копия RX: %s", type(error).__name__)
                 offset = self.get("offset", 0)
                 self.reconcile_events(offset)
                 updates = self.telegram.api("getUpdates", {
@@ -159,6 +166,8 @@ class Bot:
         if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
             return
         if self.coaching is not None and self.coaching.handle(update_id, user, message, received):
+            return
+        if self.operations is not None and self.operations.handle(update_id, user, message, received):
             return
         if self.pilot_orders is not None and self.pilot_orders.handle(update_id, user, message, received):
             return
@@ -481,6 +490,8 @@ def main():
                       if os.environ.get("TRACKER_COMMERCIAL_OPEN") == "1" else None)
             pilot_class = Sales if os.environ.get("TRACKER_FULFILLMENT") == "1" else Pilot
             bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller)
+        if os.environ.get("TRACKER_OPERATIONS") == "1":
+            bot.operations = Operations(bot.db, telegram, bot.owner, data)
         if groups:
             try:
                 if not account.get("supports_inline_queries"):
