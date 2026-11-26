@@ -41,6 +41,8 @@
     "bot/__init__.py": "AGPL-3.0-only",
     "bot/ledger.py": "AGPL-3.0-only",
     "bot/main.py": "AGPL-3.0-only",
+    "bot/coaching.py": "AGPL-3.0-only",
+    "bot/test_coaching.py": "AGPL-3.0-only",
     "bot/providers.py": "AGPL-3.0-only",
     "bot/test_tracker.py": "AGPL-3.0-only",
     "docs/google-base.md": "CC-BY-SA-4.0",
