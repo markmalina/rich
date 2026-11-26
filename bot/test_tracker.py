@@ -328,12 +328,15 @@ class TelegramOnlyTest(unittest.TestCase):
             try:
                 for user in (7, 8, 7):
                     bot.dispatch(1, {"from": {"id": user}, "chat": {"id": user}, "text": "/status"}, NOW)
+                bot.dispatch(2, {"from": {"id": 8}, "chat": {"id": 8}, "text": "/amount 60"}, NOW)
                 self.assertEqual([call.args for call in sheets.read.call_args_list], [
                     ("'Входящие'!A1:H1",), ("'События'!I1",), ("'Входящие'!A1:H1",),
                 ])
-                self.assertEqual([call.args[0] for call in telegram.message.call_args_list], [7, 7])
+                self.assertEqual([call.args[0] for call in telegram.message.call_args_list], [7, 8, 7])
                 self.assertIn("заголовки совпадают", telegram.message.call_args_list[0].args[1])
-                self.assertIn("не удалось", telegram.message.call_args_list[1].args[1])
+                self.assertEqual(telegram.message.call_args_list[1].args[1],
+                                 "Этот дневник eRex привязан к другому Telegram-профилю.")
+                self.assertIn("не удалось", telegram.message.call_args_list[2].args[1])
                 sheets.append.assert_not_called()
                 model.plan.assert_not_called()
             finally:

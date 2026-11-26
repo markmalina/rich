@@ -167,6 +167,8 @@ class Bot:
                 bot.handle(update_id, message, received)
             finally:
                 bot.db.close()
+        elif message.get("text") == "/status":
+            self.telegram.message(user, "Этот дневник eRex привязан к другому Telegram-профилю.")
 
     def capture(self, origin, received, source, text, file_ref):
         found = inbox_index(self.sheets, origin)
