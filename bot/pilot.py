@@ -71,7 +71,8 @@ class Pilot:
         if len(argument)>1600:
             self.telegram.message(user,"Сократи команду до 1600 знаков.")
             return True
-        reads={"/school","/pilot","/pilot_order","/school_day","/school_history","/school_status"}
+        reads={"/school","/pilot","/pilot_order","/school_day","/school_history","/school_status",
+               "/pilot_delivery","/pilot_margin","/pilot_metrics"}
         try:
             with self.db:
                 replay = self.db.execute("SELECT result FROM pilot_ops WHERE update_id=? AND user=?",
