@@ -62,8 +62,8 @@ def apply_privacy(db, ledger):
         db.execute(f"DELETE FROM school_work WHERE order_id IN ({orders})",(user,day))
         db.execute(f"DELETE FROM school_comments WHERE order_id IN ({orders})",(user,day))
         if table_exists(db,"privacy_requests"):
-            db.execute("UPDATE privacy_requests SET resolved=? WHERE user=? AND kind='school' AND resolved IS NULL",
-                       (day,user))
+            db.execute("UPDATE privacy_requests SET resolved=? WHERE user=? AND kind='school' "
+                       "AND resolved IS NULL AND requested<=?", (day,user,day))
 
 
 class Operations:

@@ -75,6 +75,11 @@ class OperationsTest(unittest.TestCase):
         self.assertEqual(restored.execute("SELECT learner,text FROM school_work").fetchall(),[(9,"only B")])
         self.assertEqual(restored.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(),(2,))
         self.assertEqual(restored.execute("SELECT suspended FROM school_enrolments WHERE learner=8").fetchone(),(1,))
+        self.now+=dt.timedelta(days=1)
+        self.call(8,"/pilot_privacy school")
+        with self.db:
+            apply_privacy(self.db,self.ops.ledger)
+        self.assertIsNone(self.db.execute("SELECT resolved FROM privacy_requests WHERE user=8").fetchone()[0])
 
     def test_network_counts_unique_payors_and_hides_demo(self):
         Coaching(self.db,self.tg,7)
