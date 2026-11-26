@@ -33,6 +33,11 @@ EVENT_UNCONFIRMED = "Входящее сохранено. Запись в «Со
 EVENT_EXISTS = "С этим входящим уже связаны записи в «БАЗЕ»."
 
 
+def verify_ledger_schema(sheets):
+    if sheets.read(f"'{INBOX}'!A1:H1") != [INBOX_HEADERS] or sheets.read(f"'{EVENTS}'!I1") != [["ID входящего"]]:
+        raise ProviderError("Google Sheets", "unsupported ledger schema")
+
+
 def attachment(message):
     if voice := message.get("voice"):
         return voice, "audio/ogg", ".ogg"
@@ -177,6 +182,17 @@ class Bot:
     def handle(self, update_id, message, received):
         chat = message["chat"]["id"]
         text = message.get("text") or message.get("caption") or ""
+        if message.get("text") == "/status":
+            status = "Telegram подключён. «БАЗА» пока не подключена."
+            if self.sheets is not None:
+                try:
+                    verify_ledger_schema(self.sheets)
+                except ProviderError:
+                    status = "Telegram подключён. Проверить доступ к «БАЗЕ» или её схему сейчас не удалось."
+                else:
+                    status = "Telegram подключён. Читаю «БАЗУ», заголовки совпадают со схемой Rich."
+            self.telegram.message(chat, status)
+            return
         if self.sheets is None:
             if text == "/start":
                 self.telegram.message(chat, "Привет, я eRex. Telegram подключён. Запись в «БАЗУ» пока недоступна.")
@@ -184,7 +200,8 @@ class Bot:
                 self.telegram.message(chat, LEDGER_UNAVAILABLE)
             return
         if text == "/start":
-            self.telegram.message(chat, "Присылай текст, голосовое или фото чека. Можешь спросить «Что я сегодня ел?».")
+            self.telegram.message(chat, "Присылай текст, голосовое или фото чека. Можешь спросить «Что я сегодня ел?». "
+                                  "Подключение к «БАЗЕ» можно проверить через /status.")
             return
         if text.startswith("/original "):
             ref = text.removeprefix("/original ").strip()
@@ -394,8 +411,8 @@ def main():
                 sheets = ScriptSheets(session, *(os.environ[name] for name in SCRIPT_SETTINGS), spreadsheet)
             else:
                 sheets = Sheets(spreadsheet, json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]))
-            if sheets.read(f"'{INBOX}'!A1:H1") != [INBOX_HEADERS] or sheets.read(f"'{EVENTS}'!I1") != [["ID входящего"]]:
-                raise ProviderError("Google Sheets", "unsupported ledger schema")
+            verify_ledger_schema(sheets)
+            logging.info("Rich: проверены заголовки подключённой БАЗЫ")
         if not pilot:
             account = telegram.api("getMe", {})
         logging.info("Telegram @%s: %s", account["username"],
