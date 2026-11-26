@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from .event_write import EventWrite
 from .group_reports import build_report
-from .ledger import EVENT_FIELDS, MOSCOW, QUERY_FIELDS, Clarification, action_catalog, ledger_rows, summarize_query
+from .ledger import EVENT_FIELDS, INBOX_HEADERS, MOSCOW, QUERY_FIELDS, Clarification, action_catalog, ledger_rows, summarize_query
 from .main import EVENT_UNCONFIRMED, Bot, attachment
 from .providers import ProviderError
 
@@ -268,6 +268,25 @@ class ReplayTest(unittest.TestCase):
 
 
 class TelegramOnlyTest(unittest.TestCase):
+    def test_owner_status_reads_only_headers_and_does_not_capture_the_command(self):
+        telegram, model, sheets = Mock(), Mock(), Mock()
+        sheets.read.side_effect = [[INBOX_HEADERS], [["ID входящего"]], ProviderError("Apps Script", "unavailable")]
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            bot = Bot(telegram, sheets, model, Path(directory), 7)
+            try:
+                for user in (7, 8, 7):
+                    bot.dispatch(1, {"from": {"id": user}, "chat": {"id": user}, "text": "/status"}, NOW)
+                self.assertEqual([call.args for call in sheets.read.call_args_list], [
+                    ("'Входящие'!A1:H1",), ("'События'!I1",), ("'Входящие'!A1:H1",),
+                ])
+                self.assertEqual([call.args[0] for call in telegram.message.call_args_list], [7, 7])
+                self.assertIn("заголовки совпадают", telegram.message.call_args_list[0].args[1])
+                self.assertIn("не удалось", telegram.message.call_args_list[1].args[1])
+                sheets.append.assert_not_called()
+                model.plan.assert_not_called()
+            finally:
+                bot.db.close()
+
     def test_start_and_report_are_answered_without_processing_the_report(self):
         telegram = Mock()
         with tempfile.TemporaryDirectory(dir=".") as directory:
