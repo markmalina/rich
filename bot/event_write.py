@@ -69,6 +69,11 @@ class EventWrites:
         """, (user, update_id)).fetchone()
         return self.decode(row) if row else None
 
+    def pending_event(self, user, spreadsheet, key):
+        batches = self.db.execute("SELECT rows FROM event_writes WHERE user = ? AND spreadsheet = ?",
+                                  (user, spreadsheet))
+        return any(value_at(event, 11) == key for (rows,) in batches for event in json.loads(rows))
+
     def stage(self, batch):
         with self.db:
             saved = self.db.execute("""

@@ -4,7 +4,11 @@
 import datetime as dt
 from decimal import Decimal
 import math
+import re
 from zoneinfo import ZoneInfo
+
+TELEGRAM_SOURCE = re.compile(r"tg-([0-9]+)-([0-9]+)")
+TELEGRAM_EVENT = re.compile(r"tg-([0-9]+)-[0-9]+-e[0-9]+")
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 SHEETS_EPOCH = dt.date(1899, 12, 30)
@@ -101,6 +105,50 @@ def event_clock(event, received):
 
 def value_at(row, index, default=""):
     return row[index] if len(row) > index else default
+
+
+def current_events(rows):
+    latest, revisions = {}, []
+    for row in rows:
+        key = value_at(row, 11)
+        source = TELEGRAM_SOURCE.fullmatch(str(value_at(row, 8)))
+        event = TELEGRAM_EVENT.fullmatch(str(key))
+        revision = int(source[2]) if source and event and source[1] == event[1] else None
+        if revision is not None:
+            latest[key] = max(latest.get(key, 0), revision)
+        revisions.append((key, revision))
+    return [row for row, (key, revision) in zip(rows, revisions)
+            if revision is None or latest[key] == revision]
+
+
+def revised_quantity(rows, target, origin, amount, unit, selected):
+    candidates = {row[11] for row in rows if value_at(row, 8) == target
+                  and TELEGRAM_EVENT.fullmatch(str(value_at(row, 11)))}
+    if selected and selected not in candidates:
+        raise Clarification("Этот ID не относится к исходному сообщению.")
+    if not candidates:
+        raise Clarification("В ответе на это сообщение не нашёл подтверждённое событие в «БАЗЕ».")
+    if not selected and len(candidates) != 1:
+        options = sorted(candidates)
+        raise Clarification("Выбери ID события и ответь на исходное сообщение командой /amount ID число: "
+                            + ", ".join(options[:20]))
+    key = selected or next(iter(candidates))
+    active = [row for row in current_events(rows) if value_at(row, 11) == key]
+    if len(active) != 1 or value_at(active[0], 3) in FINANCIAL_LABELS or type(value_at(active[0], 4)) not in (int, float):
+        raise Clarification("Здесь можно изменить количество только у одной строки с числом. "
+                            "Для связанного или денежного события нужна отдельная правка.")
+    existing = active[0]
+    if unit and unit.casefold() != str(value_at(existing, 5)).casefold():
+        raise Clarification("Оставь прежнюю единицу или укажи только число.")
+    new_source = TELEGRAM_SOURCE.fullmatch(origin)
+    active_source = TELEGRAM_SOURCE.fullmatch(str(existing[8]))
+    if not new_source or not active_source or new_source[1] != active_source[1] or int(new_source[2]) <= int(active_source[2]):
+        raise Clarification("Эта правка уже обработана или старше действующей версии.")
+    revised = [value_at(existing, i) for i in range(15)]
+    revised[2] = revised[12] or revised[3]
+    revised[4] = amount
+    revised[8] = origin
+    return revised
 
 
 def action_catalog(rows):
@@ -212,7 +260,7 @@ def summarize_query(rows, actions, query, today):
     if since > until or (until - since).days > 366:
         raise Clarification("Уточни период до одного года.")
     matches = []
-    for row in rows:
+    for row in current_events(rows):
         date = as_date(value_at(row, 0))
         action = value_at(row, 3)
         if not date or not since <= date <= until or not action:

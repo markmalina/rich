@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import datetime as dt
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -132,6 +133,57 @@ class FakeGoogle:
 
 
 class ReplayTest(unittest.TestCase):
+    def test_model_outage_keeps_the_input_and_does_not_block_the_next_message(self):
+        google, telegram, model = FakeGoogle(), Mock(), Mock()
+        model.plan.side_effect = [ProviderError("OpenAI", 429), {
+            "decision": "query", "continues": False, "message": "", "query": dict.fromkeys(QUERY_FIELDS),
+        }]
+        with tempfile.TemporaryDirectory(dir=".") as directory:
+            bot = Bot(telegram, google, model, Path(directory), 7)
+            try:
+                for number in (1, 2):
+                    bot.handle(number, {"chat": {"id": 7}, "message_id": number, "text": "Что я записал?",
+                                        "date": int(NOW.timestamp())}, NOW)
+            finally:
+                bot.db.close()
+        self.assertEqual(len(google.inbox), 2)
+        self.assertFalse(google.events)
+        self.assertEqual(model.plan.call_count, 2)
+        self.assertIn("ИИ сейчас недоступен", telegram.message.call_args_list[0].args[1])
+        self.assertIn("подходящих записей", telegram.message.call_args_list[1].args[1])
+
+    def test_quantity_correction_reuses_event_id_and_only_latest_value_is_read(self):
+        google, telegram, model = FakeGoogle(), Mock(), Mock()
+        meal = event("fact", date="2026-11-22", time="08:10", action="Завтрак", summary="Гранола 80 г",
+                     quantity=80, unit="г", resource="Гранола")
+        future = event("fact", date="2026-11-23", time="09:00", action="Яблоко", quantity=1, unit="шт.")
+        google.events, _ = ledger_rows([meal, future], "tg-7-9", NOW, ACTIONS, None)
+        with tempfile.TemporaryDirectory(dir=".") as directory, patch.dict(os.environ, TRACKER_QUANTITY_CORRECTIONS="1"):
+            bot = Bot(telegram, google, model, Path(directory), 7)
+            try:
+                incoming = {"chat": {"id": 7}, "date": int(NOW.timestamp()), "message_id": 10,
+                            "text": "исправь на 60 г", "reply_to_message": {"from": {"id": 7}, "message_id": 9}}
+                bot.handle(20, incoming, NOW)
+                self.assertIn("Выбери ID", telegram.message.call_args.args[1])
+                correction = dict(incoming, message_id=11, text="/amount tg-7-9-e1 60 г")
+                bot.handle(21, correction, NOW)
+                bot.handle(21, correction, NOW)
+                self.assertIn("Гранола · 60 г", telegram.message.call_args.args[1])
+                self.assertEqual(len(google.events), 3)
+                self.assertEqual(google.events[0][4], 80)
+                self.assertEqual(google.events[-1][11], google.events[0][11])
+                self.assertEqual(google.events[-1][:2], google.events[0][:2])
+                self.assertEqual(google.events[-1][8], "tg-7-11")
+                model.plan.assert_not_called()
+            finally:
+                bot.db.close()
+        query = {**dict.fromkeys(QUERY_FIELDS), "from_date": "2026-11-22"}
+        report = summarize_query(google.events[::-1], ACTIONS, query, NOW.date())
+        self.assertIn("найдено строк: 1", report)
+        self.assertIn("Гранола · 60 г", report)
+        self.assertNotIn("80 г", report)
+        self.assertIn("Яблоко", summarize_query(google.events, ACTIONS, dict.fromkeys(QUERY_FIELDS), NOW.date()))
+
     def test_retry_keeps_one_inbox_row_and_one_event(self):
         google = FakeGoogle()
         with tempfile.TemporaryDirectory(dir=".") as directory:
