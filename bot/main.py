@@ -556,14 +556,17 @@ class Bot:
             if sheets is None:
                 continue
             result = self.verify_event(batch, sheets)
-            if result:
-                text = self.event_confirmation(batch.rows) if result == "verified" else EVENT_EXISTS
-                try:
-                    self.telegram.message(batch.user, text)
-                except ProviderError as error:
+            if not result:
+                continue
+            text = self.event_confirmation(batch.rows) if result == "verified" else EVENT_EXISTS
+            try:
+                self.telegram.message(batch.user, text)
+            except ProviderError as error:
+                if not isinstance(error, RecipientUnavailable) or error.chat_id != batch.user:
                     logging.warning("Подтверждение записи RX: %s", error)
-                else:
-                    self.event_writes.finish(batch.user, batch.origin)
+                    continue
+                logging.warning("Подтверждение записи RX: адресат больше не принимает личные ответы")
+            self.event_writes.finish(batch.user, batch.origin)
 
     def reply(self, update, chat, text, question=None, *, settled_origin=None):
         with self.db:

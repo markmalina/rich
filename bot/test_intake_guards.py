@@ -80,6 +80,47 @@ class IntakeTest(unittest.TestCase):
         self.assertIn("не найден", self.tg.message.call_args.args[1])
         self.assertEqual(self.tg.api.call_count, 1)
 
+    def test_transcription_timeout_keeps_original_for_manual_record_after_restart(self):
+        audio = Path(__file__).with_name("voice-sample.ogg").read_bytes()
+        self.tg.media.return_value = audio
+        self.model.transcribe.side_effect = ProviderError("OpenAI transcription", "connection")
+        source = self.submit(1, voice={"file_id": "voice-fixture"})
+        self.submit(1, voice={"file_id": "voice-fixture"})
+        self.assertIn("/record", self.tg.message.call_args.args[1])
+        self.assertEqual(self.google.events, [])
+
+        self.bot.db.close()
+        self.bot = Bot(self.tg, self.google, self.model, self.root, 7)
+        self.addCleanup(self.bot.db.close)
+        read = self.google.read
+
+        def with_squats(area):
+            entries = read(area)
+            if area == "'Действия'!A2:G":
+                return entries + [["Приседание", "Физические упражнения", "повт.", "", "", "", "Физические упражнения"]]
+            return entries
+
+        with patch.object(self.google, "read", side_effect=with_squats):
+            for number in (2, 2, 3):
+                self.submit(number, text="/record Приседание | Учебная запись | 15", reply_to_message=source)
+        movements = [row for row in self.google.events if row[3] == "Приседание"]
+        self.assertEqual(len(movements), 1)
+        self.assertEqual(movements[0][4:6], [15, "повт."])
+        self.assertEqual(movements[0][8], "tg-7-1")
+
+        def verify_original(method, body, *, files):
+            self.assertEqual((method, body["chat_id"]), ("sendDocument", 7))
+            self.assertEqual(files["document"][1].read(), audio)
+
+        self.tg.api.side_effect = verify_original
+        self.submit(4, text="/original", reply_to_message=source)
+        self.submit(5, text="/original tg-8-1.ogg")
+        self.assertIn("не найден", self.tg.message.call_args.args[1])
+        self.tg.api.assert_called_once()
+        self.tg.media.assert_called_once()
+        self.model.transcribe.assert_called_once()
+        self.model.plan.assert_not_called()
+
     def test_complete_and_hidden_total_receipts_are_each_one_movement(self):
         self.tg.media.return_value = b"synthetic receipt bytes"
         receipt = event("purchase", summary="Учебная покупка", amount=360, currency="RUB", payment_account="Карта")

@@ -307,6 +307,42 @@ class ReplayTest(unittest.TestCase):
         self.assertIn("Записал в «БАЗУ».", telegram.message.call_args.args[1])
         model.plan.assert_called_once()
 
+    def test_reconciled_event_does_not_retry_permanent_private_delivery_failure(self):
+        google, telegram = FakeGoogle(), Mock()
+        model, message = self.set_up_transfer(google)
+        append = google.append
+        delayed = []
+
+        def postpone_commit(area, rows):
+            if "События" in area:
+                delayed.extend(rows)
+                raise ProviderError("Google Sheets", "connection")
+            return append(area, rows)
+
+        with tempfile.TemporaryDirectory() as directory:
+            bot = Bot(telegram, google, model, Path(directory), 7)
+            try:
+                with patch.object(google, "append", side_effect=postpone_commit):
+                    bot.handle(50, message, NOW)
+                self.assertTrue(bot.event_writes.find(7, 50).sent)
+                google.events.extend(delayed)
+
+                telegram.message.side_effect = ProviderError("Telegram", 429)
+                with patch("bot.main.time.time", return_value=100):
+                    bot.reconcile_events(51)
+                self.assertIsNotNone(bot.event_writes.find(7, 50))
+
+                telegram.message.side_effect = RecipientUnavailable(7)
+                with patch("bot.main.time.time", return_value=280):
+                    bot.reconcile_events(51)
+                self.assertIsNone(bot.event_writes.find(7, 50))
+                with patch("bot.main.time.time", return_value=460):
+                    bot.reconcile_events(51)
+                self.assertEqual(telegram.message.call_count, 3)
+                self.assertEqual(len(google.events), 2)
+            finally:
+                bot.db.close()
+
     def test_pending_write_cannot_follow_an_owner_to_a_different_workbook(self):
         google = FakeGoogle()
         other = FakeGoogle()
