@@ -122,6 +122,69 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertRegex(rows[1][1], r"^demo-self:2:[0-9a-f]{32}$")
 
+    def test_private_referral_to_school_coaching_and_delivery_in_demo_mode(self):
+        self.message(8, "/start tracking_GR020010")
+        self.click_label(8, "Оплатить")
+        self.click_label(8, "Я оплатил")
+        self.click_label(8, "Отметить: Питание")
+        self.assertIn("Дней с отметками: 1 из 21", self.screen()["text"])
+
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.click_label(8, "Оплатить")
+        confirm = self.click_label(8, "Я оплатил")
+        self.callback(8, confirm)
+        self.assertIn("/school_day 2", self.screen()["text"])
+        for day in (7, 14, 21):
+            self.now = dt.datetime(2026, 11, 27, 20, 0, tzinfo=MOSCOW) + dt.timedelta(days=day - 1)
+            self.message(8, f"/school_work 2 {day} | Личный пример {day}")
+            self.assertIn("Личный черновик", self.tg.message.call_args.args[1])
+        self.message(7, "/school_history 2")
+        self.assertIn("Доступных работ", self.tg.message.call_args.args[1])
+        self.message(7, "/school_finish 2")
+        self.assertIn("подтверждено", self.tg.message.call_args.args[1])
+
+        self.message(7, "/coach_allow 8")
+        self.message(8, "/coach_invite demo")
+        invite = self.tg.message.call_args.args[1].split()[-1]
+        self.message(9, f"/coach_join {invite}")
+        self.message(9, "/coach_plan 1 | движение | отчёт | пн,вт,ср,чт,пт,сб,вс | 5 мин | 20:00–21:00")
+        self.message(9, "/coach_share_plan 1")
+        self.message(8, "/coach_accept 1")
+        self.message(9, "/pay")
+        self.click_label(9, "Оплатить день у трекера #1 · 100 ₽")
+        confirm = self.click_label(9, "Я оплатил")
+        self.callback(9, confirm)
+        self.assertIn("/coach_report 1", self.screen()["text"])
+        self.message(9, "/coach_report 1 | да")
+        self.message(8, "/school_status 2")
+        self.assertIn("Курс завершён", self.tg.message.call_args.args[1])
+        self.assertIn("Реальных клиентов: 0. Подтверждено оплаченных дней: 0", self.tg.message.call_args.args[1])
+
+        self.message(7, "/pilot_stock 2 reserve 21 | kit-reserve")
+        for units in (14, 7):
+            for action in ("ship", "deliver"):
+                self.message(7, f"/pilot_stock 2 {action} {units} | kit-{action}-{units}")
+        self.message(8, "/pilot_delivery 2")
+        self.assertIn("вручено 21", self.tg.message.call_args.args[1])
+
+        self.message(7, "/pilot_goods 8 demo 1 80 350 | GR020010")
+        self.message(8, "/pay")
+        self.click_label(8, "Гранола #3 · 350 ₽")
+        self.click_label(8, "Оплатить")
+        self.click_label(8, "Я оплатил")
+        self.assertIn("/pilot_delivery 3", self.screen()["text"])
+        orders = self.db.execute(
+            "SELECT kind, demo, source, state FROM pilot_orders ORDER BY id"
+        ).fetchall()
+        self.assertEqual(orders, [("tracking", 1, "GR020010", "paid"), ("package", 1, None, "paid"),
+                                  ("granola", 1, "GR020010", "paid")])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(), (3,))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (1,))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_work WHERE shared=1").fetchone(), (0,))
+        self.assertIn("Гранола: заявок 1, оплат 1", self.bot.pilot_orders.metrics(True, "GR020010"))
+        self.assertNotIn("оплат 1", self.bot.pilot_orders.metrics(False, None))
+
     def test_no_bypass_to_cancelled_live_foreign_or_group_order(self):
         self.message(8, "/start tracking")
         self.callback(7, "dp:paid:1")
