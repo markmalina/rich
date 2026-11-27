@@ -50,10 +50,14 @@ class EventWrites:
             CREATE TABLE IF NOT EXISTS event_writes (
                 user INTEGER NOT NULL, origin TEXT NOT NULL, update_id INTEGER NOT NULL,
                 spreadsheet TEXT NOT NULL, rows TEXT NOT NULL, fallback TEXT NOT NULL, question TEXT NOT NULL,
-                sent INTEGER NOT NULL DEFAULT 0, next_check INTEGER NOT NULL DEFAULT 0,
+                sent INTEGER NOT NULL DEFAULT 0, next_check INTEGER NOT NULL DEFAULT 0, queued_at INTEGER,
                 PRIMARY KEY (user, origin), UNIQUE (user, update_id)
             )
         """)
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(event_writes)")}
+        if "queued_at" not in columns:
+            self.db.execute("ALTER TABLE event_writes ADD COLUMN queued_at INTEGER")
+        self.db.execute("UPDATE event_writes SET queued_at=CAST(strftime('%s','now') AS INTEGER) WHERE queued_at IS NULL")
         self.db.commit()
 
     @staticmethod
@@ -77,8 +81,8 @@ class EventWrites:
     def stage(self, batch):
         with self.db:
             saved = self.db.execute("""
-                INSERT INTO event_writes (user, origin, update_id, spreadsheet, rows, fallback, question)
-                VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(user, origin) DO NOTHING
+                INSERT INTO event_writes (user, origin, update_id, spreadsheet, rows, fallback, question, queued_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER)) ON CONFLICT(user, origin) DO NOTHING
             """, (batch.user, batch.origin, batch.update_id, batch.spreadsheet, json.dumps(batch.rows),
                   batch.fallback, json.dumps(batch.question)))
         return bool(saved.rowcount)

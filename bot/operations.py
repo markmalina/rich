@@ -4,8 +4,10 @@
 """Local recovery and privacy operations for the pilot, separate from Google journals."""
 
 import argparse
+import datetime as dt
 import io
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -14,9 +16,12 @@ import tempfile
 
 from .coaching import day_arg, valid_id
 from .ledger import Clarification, MOSCOW
+from .providers import ProviderError
 
 TABLES = {"pilot_orders", "school_enrolments", "pilot_kits", "pilot_stock", "pilot_refunds",
           "coach_links", "coach_payments", "event_writes", "privacy_requests"}
+ALERT_INTERVAL = dt.timedelta(minutes=1)
+WARNING_QUEUE_SECONDS = 15 * 60
 
 
 def table_exists(db, name):
@@ -67,10 +72,15 @@ def apply_privacy(db, ledger):
 
 
 class Operations:
-    def __init__(self,db,telegram,owner,directory):
+    def __init__(self,db,telegram,owner,directory,*,ai_quota=None,ai_disabled=False,alerts=False):
         self.db=db
         self.telegram=telegram
         self.owner=owner
+        self.ai_quota=ai_quota
+        self.ai_disabled=ai_disabled
+        self.alerts=alerts
+        self.last_poll=None
+        self._next_alert_check=None
         self.directory=Path(directory)
         self.storage=self.directory/"operations"
         self.storage.mkdir(mode=0o700,parents=True,exist_ok=True)
@@ -83,6 +93,7 @@ class Operations:
                     resolved TEXT, PRIMARY KEY(user,kind)
                 )
             """)
+            self.db.execute("CREATE TABLE IF NOT EXISTS operational_incidents(code TEXT PRIMARY KEY)")
         fd=os.open(self.ledger_path,os.O_WRONLY|os.O_CREAT,0o600)
         os.close(fd)
         self.ledger=sqlite3.connect(self.ledger_path)
@@ -174,7 +185,33 @@ class Operations:
         """,(self.owner,day)).fetchone()
         return f"{day} МСК. Уникальных платящих {people}. Оплаченных назначений {links}. У владельца {owner}."
 
-    def health(self):
+    def oldest_queue(self, now):
+        if not table_exists(self.db,"event_writes"):
+            return None
+        (stamp,) = self.db.execute("SELECT MIN(queued_at) FROM event_writes").fetchone()
+        return max(0,int(now.timestamp())-stamp) if stamp is not None else None
+
+    def check_alerts(self, now):
+        if not self.alerts or not self.owner or (self._next_alert_check and now < self._next_alert_check):
+            return
+        self._next_alert_check = now + ALERT_INTERVAL
+        disk = shutil.disk_usage(self.directory)
+        age = self.oldest_queue(now)
+        flags = {"disk_low": disk.free < max(32*1024*1024, disk.total//20),
+                 "queue_stale": age is not None and age >= WARNING_QUEUE_SECONDS}
+        previous = {code for (code,) in self.db.execute("SELECT code FROM operational_incidents")}
+        active = {code for code, relevant in flags.items() if relevant}
+        with self.db:
+            self.db.executemany("DELETE FROM operational_incidents WHERE code=?", [(code,) for code in previous-active])
+            self.db.executemany("INSERT INTO operational_incidents VALUES (?)", [(code,) for code in active-previous])
+        if new := active-previous:
+            try:
+                self.telegram.message(self.owner, "RX · эксплуатация. " + ", ".join(sorted(new)) + ". /pilot_health")
+            except ProviderError as error:
+                logging.warning("Уведомление RX: %s", error)
+
+    def health(self, now=None):
+        now = now or dt.datetime.now(MOSCOW)
         counts={t:self.db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
                 for t in sorted(TABLES) if table_exists(self.db,t)}
         disk=shutil.disk_usage(self.directory)
@@ -183,8 +220,16 @@ class Operations:
             info+=" Мало места."
         backups=list(self.storage.glob("rx-*.sqlite"))
         latest=max((p.stem.removeprefix("rx-") for p in backups),default="ещё нет")
+        age=self.oldest_queue(now)
+        oldest=f" Самая старая: {age//60} мин." if age is not None else ""
+        last_poll = self.last_poll.astimezone(MOSCOW).strftime("%d.%m %H:%M") if self.last_poll else "ожидается"
+        ai = "выключен" if self.ai_disabled else "лимит обращений не задан"
+        if self.ai_quota is not None and not self.ai_disabled:
+            used,limit=self.ai_quota.status(now)
+            ai=f"обращения {used} из {limit} за день МСК"
         return (f"Копия SQLite: {latest}. {info}\n"
-                f"Очередь личных записей: {counts.get('event_writes',0)}. "
+                f"Опрос Telegram: {last_poll}. ИИ: {ai}.\n"
+                f"Очередь личных записей: {counts.get('event_writes',0)}.{oldest} "
                 f"Заказы: {counts.get('pilot_orders',0)}. Зачисления: {counts.get('school_enrolments',0)}. "
                 f"Движения выдачи: {counts.get('pilot_stock',0)}. Возвраты: {counts.get('pilot_refunds',0)}.")
 
