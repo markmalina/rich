@@ -8,8 +8,10 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import tempfile
 import time
 
+from .ai_quota import AIQuota
 from .coaching import Coaching
 from .demo_checkout import DemoCheckout
 from .event_write import EVENTS, INBOX, EventWrite, EventWrites, inbox_index
@@ -19,6 +21,7 @@ from .ledger import (
     Clarification, INBOX_HEADERS, MONEY_ACTIONS, MOSCOW, PLAN_SCHEMA, TELEGRAM_EVENT, action_catalog,
     ledger_rows, revised_quantity, sheets_timestamp, summarize_query,
 )
+from .manual import HELP as MANUAL_HELP, RECORD_COMMAND, parse_manual
 from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
 from .operations import Operations
 from .pilot import Pilot
@@ -32,11 +35,14 @@ from .sales import Sales
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 REQUIRED = ("TELEGRAM_BOT_TOKEN", "TRACKER_DATA_DIR")
-LEDGER_REQUIRED = ("OPENAI_API_KEY", "TRACKER_SPREADSHEET_ID")
+LEDGER_REQUIRED = ("TRACKER_SPREADSHEET_ID",)
 LEDGER_UNAVAILABLE = "Запись в «БАЗУ» пока недоступна. Пришли сообщение заново после её подключения."
 EVENT_UNCONFIRMED = "Входящее сохранено. Запись в «События» ещё проверяю."
 EVENT_EXISTS = "С этим входящим уже связаны записи в «БАЗЕ»."
-MODEL_UNAVAILABLE = "Входящее сохранено. ИИ сейчас недоступен. Попробуй прислать запись позже или опиши её текстом."
+MODEL_UNAVAILABLE = "Входящее сохранено. ИИ сейчас недоступен. Для ручной записи ответь на исходное сообщение командой /record."
+MODEL_LIMIT = "Входящее сохранено. Дневной лимит ИИ исчерпан. Для ручной записи ответь на исходное сообщение командой /record."
+ORIGINAL_REF = re.compile(r"tg-([0-9]+)-[0-9]+\.(ogg|jpg|png|webp)")
+OGG_MIMES = {"audio/ogg", "application/ogg"}
 AMOUNT_INSTRUCTION = re.compile(r"^(?:/amount(?:\s|$)|(?:исправь|поправь|исправление)\b)", re.IGNORECASE)
 AMOUNT_VALUE = re.compile(
     r"(?:/amount|(?:исправь|поправь|исправление)(?:\s+на)?)\s+"
@@ -51,8 +57,11 @@ def verify_ledger_schema(sheets):
 
 
 def attachment(message):
-    if voice := message.get("voice"):
-        return voice, "audio/ogg", ".ogg"
+    for key in ("voice", "audio", "document"):
+        if media := message.get(key):
+            mime = media.get("mime_type")
+            if mime in OGG_MIMES or (key == "voice" and not mime):
+                return media, "audio/ogg", ".ogg"
     if photos := message.get("photo"):
         return photos[-1], "image/jpeg", ".jpg"
     if image := message.get("document"):
@@ -75,6 +84,7 @@ class Bot:
         self.pilot_orders = None
         self.demo_checkout = None
         self.operations = None
+        self.ai_quota = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -114,9 +124,16 @@ class Bot:
                         logging.warning("Локальная резервная копия RX: %s", type(error).__name__)
                 offset = self.get("offset", 0)
                 self.reconcile_events(offset)
+                if self.operations is not None:
+                    try:
+                        self.operations.check_alerts(dt.datetime.now(MOSCOW))
+                    except (OSError, sqlite3.Error) as error:
+                        logging.warning("Проверка состояния RX: %s", type(error).__name__)
                 updates = self.telegram.api("getUpdates", {
                     "offset": offset, "timeout": 25, "allowed_updates": update_types,
                 })
+                if self.operations is not None:
+                    self.operations.last_poll = dt.datetime.now(MOSCOW)
                 if first_poll:
                     logging.info("Telegram API: опрос обновлений подтверждён")
                     first_poll = False
@@ -189,6 +206,7 @@ class Bot:
             directory = self.directory / "participants" / str(user)
             directory.mkdir(parents=True, exist_ok=True)
             bot = Bot(self.telegram, None, self.model, directory, user, event_writes=self.event_writes)
+            bot.ai_quota = self.ai_quota
             try:
                 try:
                     bot.sheets = self.provisioner.provision(bot.get("files"), lambda state: bot.put("files", state))
@@ -215,10 +233,89 @@ class Bot:
         final = self.directory / f"{origin}{suffix}"
         if not final.exists():
             payload = self.telegram.media(media["file_id"], media.get("file_size"))
-            temp = final.with_suffix(final.suffix + ".part")
-            temp.write_bytes(payload)
-            temp.replace(final)
+            fd, name = tempfile.mkstemp(dir=self.directory, prefix=".attachment-")
+            temp = Path(name)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                temp.replace(final)
+            finally:
+                temp.unlink(missing_ok=True)
         return final
+
+    def originals(self, message, text):
+        chat = message["chat"]["id"]
+        if text == "/originals":
+            names = [file.name for file in self.directory.glob(f"tg-{chat}-*")
+                     if ORIGINAL_REF.fullmatch(file.name) and file.is_file()]
+            names.sort(key=lambda name: int(name.split("-")[2].partition(".")[0]), reverse=True)
+            reply = "Обращение за файлом: /original имя_файла\n"+"\n".join(names[:10]) if names else "Сохранённых оригиналов пока нет."
+            self.telegram.message(chat, reply)
+            return
+        ref = text.removeprefix("/original").strip()
+        if not ref:
+            reply = message.get("reply_to_message") or {}
+            origin = self.own_reply(chat, reply)
+            _, _, suffix = attachment(reply)
+            if origin and suffix:
+                ref = f"{origin}{suffix}"
+            else:
+                self.telegram.message(chat, "Ответь /original на своё вложение или выбери имя в /originals.")
+                return
+        valid = ORIGINAL_REF.fullmatch(ref)
+        if valid and valid[1] == str(chat):
+            file = self.directory / ref
+            if file.is_file():
+                with file.open("rb") as stream:
+                    self.telegram.api("sendDocument", {"chat_id": chat}, files={"document": (file.name, stream)})
+                return
+        self.telegram.message(chat, "Оригинал с таким именем не найден.")
+
+    @staticmethod
+    def own_reply(chat, reply):
+        message_id = reply.get("message_id")
+        if reply.get("from", {}).get("id") == chat and type(message_id) is int and message_id > 0:
+            return f"tg-{chat}-{message_id}"
+        return None
+
+    def manual_record(self, update_id, message, origin, received, text):
+        chat = message["chat"]["id"]
+        previous = self.get("question")
+        try:
+            reply = message.get("reply_to_message") or {}
+            if reply:
+                parent = self.own_reply(chat, reply)
+                if not parent or inbox_index(self.sheets, parent) is None:
+                    raise Clarification("Ответь на своё сохранённое исходное сообщение или отправь /record отдельно.")
+                origin = parent
+                if previous and previous["origin"] == parent:
+                    received = dt.datetime.fromisoformat(previous["received"])
+                    previous = None
+                elif type(reply.get("date")) is int:
+                    received = dt.datetime.fromtimestamp(reply["date"], MOSCOW)
+            actions = action_catalog(self.sheets.read("'Действия'!A2:G"))
+            event = parse_manual(text, actions)
+            self.stage_records(update_id, chat, [event], origin, received, actions, previous)
+        except Clarification as error:
+            self.reply(update_id, chat, str(error), self.get("question"))
+
+    def stage_records(self, update_id, chat, events, origin, received, actions, previous):
+        weights = self.sheets.read("'Действия'!I2")
+        rows, fallback = ledger_rows(events, origin, received, actions, weights[0][0] if weights else None)
+        batch = EventWrite(chat, origin, update_id, self.sheets.spreadsheet_id, rows, fallback, previous)
+        if self.event_writes.stage(batch):
+            self.answer_event(batch)
+        else:
+            self.reply(update_id, chat, EVENT_UNCONFIRMED, previous)
+
+    def allow_model(self):
+        if self.model is None:
+            return MODEL_UNAVAILABLE
+        if self.ai_quota is not None and not self.ai_quota.take(dt.datetime.now(MOSCOW)):
+            return MODEL_LIMIT
+        return None
 
     def handle(self, update_id, message, received):
         chat = message["chat"]["id"]
@@ -244,15 +341,11 @@ class Bot:
             self.telegram.message(chat, "Присылай текст, голосовое или фото чека. Можешь спросить «Что я сегодня ел?». "
                                   "Подключение к «БАЗЕ» можно проверить через /status.")
             return
-        if text.startswith("/original "):
-            ref = text.removeprefix("/original ").strip()
-            if re.fullmatch(r"tg-[0-9]+-[0-9]+\.(ogg|jpg|png|webp)", ref):
-                file = self.directory / ref
-                if file.is_file():
-                    with file.open("rb") as stream:
-                        self.telegram.api("sendDocument", {"chat_id": chat}, files={"document": (file.name, stream)})
-                    return
-            self.telegram.message(chat, "Оригинал с таким именем не найден.")
+        if text in {"/original", "/originals"} or text.startswith("/original "):
+            self.originals(message, text)
+            return
+        if text.strip().casefold() == "/record":
+            self.telegram.message(chat, MANUAL_HELP)
             return
 
         origin = f"tg-{chat}-{message['message_id']}"
@@ -274,8 +367,11 @@ class Bot:
         if AMOUNT_INSTRUCTION.match(message.get("text", "")):
             self.correct_quantity(update_id, message, origin, text)
             return
+        if RECORD_COMMAND.match(message.get("text", "")):
+            self.manual_record(update_id, message, origin, received, text)
+            return
         if message.get("document") and not media:
-            self.reply(update_id, chat, "Пришли фото либо файл JPG, PNG или WEBP.", self.get("question"))
+            self.reply(update_id, chat, "Пришли голосовое OGG или изображение JPG, PNG, WebP.", self.get("question"))
             return
         if not media and not text:
             self.reply(update_id, chat, "Поддерживаются текст, голосовые и фото или файлы JPG, PNG и WEBP.")
@@ -288,19 +384,29 @@ class Bot:
                 original = self.save_receipt_file(origin, suffix, media)
             except ProviderError as error:
                 if error.status in {"size", 400, 404}:
-                    self.reply(update_id, chat, "Входящее принято. Пришли вложение повторно, размером до 18 МБ.")
+                    self.sheets.update(f"'{INBOX}'!E{idx}", [[""]])
+                    self.reply(update_id, chat, "Входящее принято. Пришли вложение повторно, размером до 18 МиБ.",
+                               self.get("question"))
                     return
                 raise
         if mime == "audio/ogg":
             existing = self.sheets.read(f"'{INBOX}'!F{idx}")
+            extracted = value_at(existing[0], 0) if existing else ""
             try:
-                extracted = existing[0][0] if existing else self.model.transcribe(original.name, original.read_bytes(), mime)
+                if not extracted:
+                    if problem := self.allow_model():
+                        self.reply(update_id, chat, problem, self.get("question"))
+                        return
+                    extracted = self.model.transcribe(original.name, original.read_bytes(), mime)
             except ProviderError:
                 self.reply(update_id, chat, MODEL_UNAVAILABLE, self.get("question"))
                 return
             self.sheets.update(f"'{INBOX}'!F{idx}", [[extracted]])
 
         previous = self.get("question")
+        if problem := self.allow_model():
+            self.reply(update_id, chat, problem, previous)
+            return
         action_rows = self.sheets.read("'Действия'!A2:G")
         actions = action_catalog(action_rows)
         local_rules = self.sheets.read("'Правило'!A7:D50")
@@ -340,15 +446,7 @@ class Bot:
         try:
             match plan["decision"]:
                 case "record":
-                    weight_rows = self.sheets.read("'Действия'!I2")
-                    rows, fallback = ledger_rows(plan["events"], event_source, event_received, actions,
-                                                 weight_rows[0][0] if weight_rows else None)
-                    batch = EventWrite(chat, event_source, update_id, self.sheets.spreadsheet_id,
-                                       rows, fallback, keep_question)
-                    if self.event_writes.stage(batch):
-                        self.answer_event(batch)
-                    else:
-                        self.reply(update_id, chat, EVENT_UNCONFIRMED, keep_question)
+                    self.stage_records(update_id, chat, plan["events"], event_source, event_received, actions, keep_question)
                     return
                 case "query":
                     result = summarize_query(self.sheets.read(f"'{EVENTS}'!A2:O"), actions, plan["query"], sent.date())
@@ -444,6 +542,7 @@ def main():
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     telegram_only = os.environ.get("TRACKER_TELEGRAM_ONLY") == "1"
+    ai_disabled = os.environ.get("TRACKER_AI_DISABLED") == "1"
     pilot = os.environ.get("TRACKER_PILOT") == "1"
     owner = os.environ.get("TRACKER_OWNER_ID")
     if telegram_only and pilot:
@@ -452,11 +551,13 @@ def main():
     google_settings = legacy_google_settings(os.environ)
     required = list(REQUIRED)
     if pilot:
-        required.extend((*PILOT_CONFIG_REQUIRED, "OPENAI_API_KEY"))
+        required.extend(PILOT_CONFIG_REQUIRED)
     else:
         required.append("TRACKER_OWNER_ID")
     if not telegram_only and (owner or not pilot):
         required.extend((*LEDGER_REQUIRED, *google_settings))
+    if not telegram_only and not ai_disabled:
+        required.append("OPENAI_API_KEY")
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         logging.info("Ожидание настройки: %s", ", ".join(missing))
@@ -475,7 +576,7 @@ def main():
         sheets = None
         model = None
         provisioner = None
-        if not telegram_only:
+        if not telegram_only and not ai_disabled:
             model = Model(session, os.environ["OPENAI_API_KEY"], os.environ.get("TRACKER_MODEL", "gpt-5.4-mini"),
                           os.environ.get("TRACKER_TRANSCRIBE_MODEL", "gpt-transcribe"))
         if pilot:
@@ -495,6 +596,10 @@ def main():
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
         bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
+        if "TRACKER_AI_DAILY_CALLS" in os.environ:
+            raw_limit = os.environ["TRACKER_AI_DAILY_CALLS"]
+            limit = int(raw_limit) if re.fullmatch(r"[0-9]{1,7}", raw_limit) else 0
+            bot.ai_quota = AIQuota(bot.db, limit)
         demo_checkout = os.environ.get("TRACKER_DEMO_CHECKOUT") == "1"
         if os.environ.get("TRACKER_COACHING") == "1":
             bot.coaching = Coaching(bot.db, telegram, bot.owner, demo_only=demo_checkout)
@@ -507,7 +612,9 @@ def main():
                 bot.demo_checkout = DemoCheckout(bot.db, telegram, bot.pilot_orders, bot.coaching)
         if os.environ.get("TRACKER_OPERATIONS") == "1":
             try:
-                bot.operations = Operations(bot.db, telegram, bot.owner, data)
+                bot.operations = Operations(bot.db, telegram, bot.owner, data,
+                                            ai_quota=bot.ai_quota, ai_disabled=model is None,
+                                            alerts=os.environ.get("TRACKER_OPERATIONS_ALERTS") == "1")
             except (OSError, sqlite3.Error) as error:
                 logging.warning("Эксплуатационные команды недоступны: %s", type(error).__name__)
         if groups:

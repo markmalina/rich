@@ -3,6 +3,7 @@
 
 import base64
 import json
+import math
 import re
 from urllib.parse import quote, urlsplit
 
@@ -192,14 +193,33 @@ class Model:
         if not isinstance(response, dict):
             raise ProviderError("OpenAI", "invalid response")
         if response.get("status") == "completed":
-            for output in response.get("output", []):
-                for part in output.get("content", []):
-                    if part.get("type") == "output_text":
-                        try:
-                            plan = json.loads(part["text"])
-                        except (ValueError, KeyError, TypeError):
-                            raise ProviderError("OpenAI", "invalid response") from None
-                        if not isinstance(plan, dict) or set(plan) != set(schema["properties"]):
-                            raise ProviderError("OpenAI", "invalid response")
+            try:
+                for output in response.get("output", []):
+                    for part in output.get("content", []):
+                        if part.get("type") != "output_text":
+                            continue
+                        plan = json.loads(part["text"])
+                        if not schema_matches(plan, schema):
+                            raise ValueError("plan schema")
                         return plan
+            except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
+                raise ProviderError("OpenAI", "invalid response") from None
         raise ProviderError("OpenAI", "no plan")
+
+
+def schema_matches(value, schema):
+    # This handles the subset used by PLAN_SCHEMA before the plan touches Sheets.
+    expected = schema["type"]
+    kinds = expected if isinstance(expected, list) else [expected]
+    if value is None:
+        return "null" in kinds
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if "object" in kinds and isinstance(value, dict):
+        properties = schema["properties"]
+        return set(value) == set(properties) and all(schema_matches(value[key], spec) for key, spec in properties.items())
+    if "array" in kinds and isinstance(value, list):
+        return all(schema_matches(entry, schema["items"]) for entry in value)
+    if "number" in kinds and type(value) in {int, float}:
+        return type(value) is int or math.isfinite(value)
+    return ("string" in kinds and isinstance(value, str)) or ("boolean" in kinds and type(value) is bool)
