@@ -86,6 +86,7 @@
     "bot/group_face.py": "AGPL-3.0-only",
     "bot/test_group_face.py": "AGPL-3.0-only",
     "bot/event_write.py": "AGPL-3.0-only",
+    "bot/inbox_write.py": "AGPL-3.0-only",
     "bot/test_pilot_acceptance.py": "AGPL-3.0-only",
     "bot/pilot_check.py": "AGPL-3.0-only",
     "bot/test_pilot_check.py": "AGPL-3.0-only",

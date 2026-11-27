@@ -156,6 +156,121 @@ def membership(update, user, status):
 
 
 class PilotAcceptanceTest(unittest.TestCase):
+    def test_late_inbox_append_survives_restart_without_blocking_other_profiles(self):
+        google, telegram, owner_sheet = PilotGoogle(), PilotTelegram(), FakeGoogle()
+        late = []
+        writes = []
+        append = owner_sheet.append
+
+        def delay_first_source(area, rows):
+            if "Входящие" in area:
+                origin = rows[0][0]
+                writes.append(origin)
+                if len(writes) == 1:
+                    late.append((area, rows))
+                    raise ProviderError("Google Sheets", "connection")
+            return append(area, rows)
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch("bot.onboarding.request", side_effect=google.request),
+              patch("bot.providers.request", side_effect=google.request),
+              patch.object(owner_sheet, "append", side_effect=delay_first_source),
+              patch("bot.main.time.sleep", side_effect=AssertionError("a delayed source stopped the worker"))):
+            def new_bot():
+                return Bot(telegram, owner_sheet, None, Path(directory), OWNER, PilotProvisioner(google.session, "registry"))
+
+            first = message(100, OWNER, "/record Завтрак | Первый | 80 г")
+            second = message(101, OWNER, "/record Завтрак | Второй | 60 г")
+            telegram.updates = [first, second, message(102, MEMBER, f"/record {READING} | Другая БАЗА | 10 мин")]
+            bot = new_bot()
+            with closing(bot.db), patch("bot.main.time.time", return_value=100):
+                with self.assertRaises(KeyboardInterrupt):
+                    bot.run()
+                self.assertEqual(bot.get("offset"), 103)
+                self.assertEqual(owner_sheet.events, [])
+                self.assertEqual(len(bot.registered_sheet(MEMBER).read("'События'!A2:O")), 1)
+
+            bot = new_bot()
+            with closing(bot.db), patch("bot.main.time.time", return_value=280):
+                with self.assertRaises(KeyboardInterrupt):
+                    bot.run()
+                self.assertEqual(writes, [f"tg-{OWNER}-100"])
+                self.assertEqual(owner_sheet.events, [])
+
+            append(*late.pop())
+            bot = new_bot()
+            with closing(bot.db):
+                for tick in (460, 640, 820):
+                    with patch("bot.main.time.time", return_value=tick), self.assertRaises(KeyboardInterrupt):
+                        bot.run()
+                self.assertFalse(bot.inbox_writes.waiting(OWNER))
+            self.assertEqual(writes, [f"tg-{OWNER}-100", f"tg-{OWNER}-101"])
+            self.assertEqual([row[0] for row in owner_sheet.inbox], writes)
+            self.assertEqual([(row[2], row[4]) for row in owner_sheet.events], [("Первый", 80), ("Второй", 60)])
+
+    def test_inbox_waits_on_an_apps_script_response_error_with_a_numeric_status(self):
+        google = FakeGoogle()
+        telegram = PilotTelegram()
+        append = google.append
+        first = message(104, OWNER, "/record Завтрак | Мост | 80 г")
+        with tempfile.TemporaryDirectory() as directory:
+            bot = Bot(telegram, google, None, Path(directory), OWNER)
+            with closing(bot.db), patch.object(google, "append", side_effect=ProviderError("Apps Script", 429)) as sent:
+                bot.receive([first])
+                bot.process_update(first)
+                with patch("bot.main.time.time", return_value=100):
+                    bot.reconcile_inbox(105)
+                self.assertEqual(sent.call_count, 1)
+                area, rows = sent.call_args.args
+            append(area, rows)
+            bot = Bot(telegram, google, None, Path(directory), OWNER)
+            with closing(bot.db), patch("bot.main.time.time", return_value=280):
+                bot.reconcile_inbox(105)
+                self.assertFalse(bot.inbox_writes.waiting(OWNER))
+        self.assertEqual(len(google.inbox), 1)
+        self.assertEqual(len(google.events), 1)
+
+    def test_inbox_retries_rate_limit_and_keeps_uncertain_source_in_its_original_workbook(self):
+        google, telegram = FakeGoogle(), PilotTelegram()
+        foreign = FakeGoogle()
+        foreign.spreadsheet_id = "foreign-fixture"
+        append = google.append
+        late = []
+        writes = []
+
+        def fail_twice(area, rows):
+            if "Входящие" in area:
+                writes.append(rows[0][0])
+                if len(writes) == 1:
+                    raise ProviderError("Google Sheets", 429)
+                late.append((area, rows))
+                raise ProviderError("Google Sheets", "connection")
+            return append(area, rows)
+
+        with tempfile.TemporaryDirectory() as directory:
+            bot = Bot(telegram, google, None, Path(directory), OWNER)
+            with closing(bot.db), patch.object(google, "append", side_effect=fail_twice):
+                update = message(103, OWNER, "/record Завтрак | После 429 | 80 г")
+                bot.receive([update])
+                bot.process_update(update)
+                with patch("bot.main.time.time", return_value=100):
+                    bot.reconcile_inbox(104)
+                self.assertEqual(writes, [f"tg-{OWNER}-103"] * 2)
+                bot.sheets = foreign
+                for tick in (280, 460):
+                    with patch("bot.main.time.time", return_value=tick):
+                        bot.reconcile_inbox(104)
+                self.assertEqual(foreign.inbox, [])
+                self.assertTrue(bot.inbox_writes.waiting(OWNER))
+
+                append(*late.pop())
+                bot.sheets = google
+                with patch("bot.main.time.time", return_value=640):
+                    bot.reconcile_inbox(104)
+                self.assertFalse(bot.inbox_writes.waiting(OWNER))
+            self.assertEqual(len(google.inbox), 1)
+            self.assertEqual(len(google.events), 1)
+
     @staticmethod
     def participant_status(directory, google, telegram, update_id):
         bot = Bot(telegram, None, None, Path(directory), OWNER, PilotProvisioner(google.session, "registry"))

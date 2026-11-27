@@ -19,7 +19,7 @@ from .ledger import Clarification, MOSCOW
 from .providers import ProviderError
 
 TABLES = {"pilot_orders", "school_enrolments", "pilot_kits", "pilot_stock", "pilot_refunds",
-          "coach_links", "coach_payments", "event_writes", "privacy_requests"}
+          "coach_links", "coach_payments", "deferred_inbox", "event_writes", "privacy_requests"}
 ALERT_INTERVAL = dt.timedelta(minutes=1)
 WARNING_QUEUE_SECONDS = 15 * 60
 
@@ -198,10 +198,10 @@ class Operations:
         return f"{day} МСК. Уникальных платящих {people}. Оплаченных назначений {links}. У владельца {owner}."
 
     def oldest_queue(self, now):
-        if not table_exists(self.db,"event_writes"):
-            return None
-        (stamp,) = self.db.execute("SELECT MIN(queued_at) FROM event_writes").fetchone()
-        return max(0,int(now.timestamp())-stamp) if stamp is not None else None
+        stamps = [self.db.execute(f"SELECT MIN(queued_at) FROM {table}").fetchone()[0]
+                  for table in ("deferred_inbox", "event_writes") if table_exists(self.db, table)]
+        oldest = min((stamp for stamp in stamps if stamp is not None), default=None)
+        return max(0,int(now.timestamp())-oldest) if oldest is not None else None
 
     def check_alerts(self, now):
         if not self.alerts or not self.owner or (self._next_alert_check and now < self._next_alert_check):
@@ -243,7 +243,8 @@ class Operations:
             ai=f"обращения {used} из {limit} за день МСК"
         return (f"Копия SQLite: {latest}. {info}\n"
                 f"Опрос Telegram: {last_poll}. ИИ: {ai}.\n"
-                f"Очередь личных записей: {counts.get('event_writes',0)}.{oldest} "
+                f"Очередь личных записей: {counts.get('event_writes',0)}. "
+                f"Ожидают во «Входящих»: {counts.get('deferred_inbox',0)}.{oldest} "
                 f"Заказы: {counts.get('pilot_orders',0)}. Зачисления: {counts.get('school_enrolments',0)}. "
                 f"Движения выдачи: {counts.get('pilot_stock',0)}. Возвраты: {counts.get('pilot_refunds',0)}.")
 

@@ -17,6 +17,7 @@ from .demo_checkout import DemoCheckout
 from .event_write import EVENTS, INBOX, EventWrite, EventWrites, inbox_index
 from .group_face import GroupFace
 from .group_telegram import UPDATE_TYPES, GroupTelegram
+from .inbox_write import InboxPending, InboxWrites
 from .ledger import (
     Clarification, INBOX_HEADERS, MONEY_ACTIONS, MOSCOW, PLAN_SCHEMA, TELEGRAM_EVENT, action_catalog,
     ledger_rows, revised_quantity, sheets_timestamp, summarize_query,
@@ -42,6 +43,7 @@ EVENT_UNCONFIRMED = "Входящее сохранено. Запись в «Со
 EVENT_EXISTS = "С этим входящим уже связаны записи в «БАЗЕ»."
 MODEL_UNAVAILABLE = "Входящее сохранено. ИИ сейчас недоступен. Для ручной записи ответь на исходное сообщение командой /record."
 MODEL_LIMIT = "Входящее сохранено. Дневной лимит ИИ исчерпан. Для ручной записи ответь на исходное сообщение командой /record."
+INBOX_WAIT = "Сообщение ожидает сверки с Google. Бот продолжит с исходного сообщения."
 ORIGINAL_REF = re.compile(r"tg-([0-9]+)-[0-9]+\.(ogg|jpg|png|webp)")
 OGG_MIMES = {"audio/ogg", "application/ogg"}
 OGG_SUFFIXES = {".ogg", ".oga", ".opus"}
@@ -91,7 +93,7 @@ def attachment(message):
 
 
 class Bot:
-    def __init__(self, telegram, sheets, model, directory, owner, provisioner=None, event_writes=None):
+    def __init__(self, telegram, sheets, model, directory, owner, provisioner=None, event_writes=None, inbox_writes=None):
         self.telegram = telegram
         self.sheets = sheets
         self.model = model
@@ -111,6 +113,7 @@ class Bot:
         self.db.execute("CREATE TABLE IF NOT EXISTS receipts (id INTEGER PRIMARY KEY, received TEXT NOT NULL)")
         self.db.commit()
         self.event_writes = event_writes if event_writes is not None else EventWrites(self.db)
+        self.inbox_writes = inbox_writes if inbox_writes is not None else InboxWrites(self.db)
 
     def get(self, key, default=None):
         row = self.db.execute("SELECT value FROM state WHERE key = ?", (key,)).fetchone()
@@ -143,6 +146,7 @@ class Bot:
                     except (OSError, sqlite3.Error, RuntimeError) as error:
                         logging.warning("Локальная резервная копия RX: %s", type(error).__name__)
                 offset = self.get("offset", 0)
+                self.reconcile_inbox(offset)
                 self.reconcile_events(offset)
                 if self.operations is not None:
                     try:
@@ -190,7 +194,7 @@ class Bot:
         message = update.get("message", {})
         if message.get("chat", {}).get("type") == "private":
             if self.groups is None or not self.groups.private_history(message):
-                self.dispatch(update_id, message, received)
+                self.process_private(update_id, message, received)
         elif self.groups is not None:
             try:
                 self.groups.handle(update)
@@ -198,6 +202,40 @@ class Bot:
                 if error.provider != "Telegram" or error.status != 400:
                     raise
                 logging.warning("Отчёт RX: Telegram отклонил устаревший запрос или сообщение")
+
+    def process_private(self, update_id, message, received):
+        user = message.get("from", {}).get("id")
+        if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
+            return
+        waiting = self.inbox_writes.waiting(user)
+        if not waiting or message.get("text") in {"/status", "/pilot_health"}:
+            try:
+                self.dispatch(update_id, message, received)
+                return
+            except InboxPending:
+                pass
+        self.inbox_writes.defer(update_id, user, message, received)
+        if not waiting:
+            try:
+                self.telegram.message(user, INBOX_WAIT)
+            except ProviderError:
+                logging.warning("Входящие RX: уведомление об ожидании не доставлено")
+
+    def reconcile_inbox(self, offset):
+        now = int(time.time())
+        for update_id, user, received, payload in self.inbox_writes.due(offset, now):
+            self.inbox_writes.postpone(update_id, now + 120)
+            if self.registered_sheet(user) is None:
+                continue
+            try:
+                self.dispatch(update_id, json.loads(payload), dt.datetime.fromisoformat(received), recovering=True)
+            except InboxPending:
+                continue
+            except ProviderError as error:
+                if not isinstance(error, RecipientUnavailable) or error.chat_id != user:
+                    logging.warning("Входящие RX: обработка отложена")
+                    continue
+            self.inbox_writes.finish(update_id)
 
     def registered_sheet(self, user):
         if user == self.owner:
@@ -217,7 +255,7 @@ class Bot:
             return Sheets(state["base"], session=self.provisioner.session)
         return None
 
-    def dispatch(self, update_id, message, received):
+    def dispatch(self, update_id, message, received, *, recovering=False):
         user = message.get("from", {}).get("id")
         if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
             return
@@ -236,12 +274,15 @@ class Bot:
         elif self.provisioner is not None:
             directory = self.directory / "participants" / str(user)
             directory.mkdir(parents=True, exist_ok=True)
-            bot = Bot(self.telegram, None, self.model, directory, user, event_writes=self.event_writes)
+            bot = Bot(self.telegram, None, self.model, directory, user,
+                      event_writes=self.event_writes, inbox_writes=self.inbox_writes)
             bot.ai_quota = self.ai_quota
             try:
                 try:
                     bot.sheets = self.provisioner.provision(bot.get("files"), lambda state: bot.put("files", state))
                 except ProviderError as error:
+                    if recovering:
+                        raise
                     logging.warning("Подключение RX: %s", error)
                     bot.telegram.message(user, "Подготовка «БАЗЫ» пока не завершилась. Пришли сообщение ещё раз позже.")
                     return
@@ -257,13 +298,8 @@ class Bot:
             self.telegram.message(user, reply)
 
     def capture(self, origin, received, source, text, file_ref):
-        found = inbox_index(self.sheets, origin)
-        if found is None:
-            self.sheets.append(f"'{INBOX}'!A:H", [[origin, sheets_timestamp(received), source, text, file_ref, "", "", ""]])
-            found = inbox_index(self.sheets, origin)
-        if found is None:
-            raise ProviderError("Google Sheets", "inbox row not confirmed")
-        return found
+        row = [origin, sheets_timestamp(received), source, text, file_ref, "", "", ""]
+        return self.inbox_writes.capture(self.sheets, row)
 
     def save_receipt_file(self, origin, suffix, media):
         final = self.directory / f"{origin}{suffix}"
