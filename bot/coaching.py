@@ -38,10 +38,11 @@ HELP = """Личное сопровождение в eRex
 
 
 class Coaching:
-    def __init__(self, db, telegram, owner):
+    def __init__(self, db, telegram, owner, *, demo_only=False):
         self.db = db
         self.telegram = telegram
         self.owner = owner
+        self.demo_only = demo_only
         db.executescript("""
             CREATE TABLE IF NOT EXISTS coach_roles (user INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS coach_invites (
@@ -117,7 +118,10 @@ class Coaching:
                         "active": "согласовано", "ended": "доступ отозван"}
             links = [f"#{i} · {'клиент' if user == c else 'трекер'} · {statuses[s]}{' · учебная' if demo else ''}"
                      for i, c, _, s, demo in rows]
-            return "\n".join([*links, HELP])
+            help_text = HELP
+            if self.demo_only:
+                help_text = HELP.split("/coach_paid", 1)[0] + "Учебная оплата дня (100 ₽) — /pay. Денег не списываем."
+            return "\n".join([*links, help_text])
         if command == "/coach_id":
             return f"Твой Telegram ID: {user}. Передавай его при назначении трекером."
         if command == "/coach_allow":
@@ -132,7 +136,7 @@ class Coaching:
                 raise Clarification("Используй /coach_invite или /coach_invite demo.")
             code = token_urlsafe(18)
             self.db.execute("INSERT INTO coach_invites VALUES (?,?,?,?)",
-                            (code, user, (now+dt.timedelta(days=1)).isoformat(), int(args == "demo")))
+                            (code, user, (now+dt.timedelta(days=1)).isoformat(), int(self.demo_only or args == "demo")))
             return ("Приглашение на 24 часа, для одного человека. Передай лично:\n"
                     f"/coach_join {code}")
         if command == "/coach_join":
@@ -140,6 +144,8 @@ class Coaching:
             if not invite or dt.datetime.fromisoformat(invite[1]) <= now or invite[0] == user:
                 raise Clarification("Приглашение недействительно. Возьми новое у трекера.")
             tracker, _, demo = invite
+            if self.demo_only and not demo:
+                raise Clarification("Сейчас доступны учебные приглашения. Возьми новое у трекера.")
             existing = self.db.execute("""
                 SELECT id FROM coach_links WHERE client=? AND tracker=? AND demo=? AND state<>'ended'
             """, (user, tracker, demo)).fetchone()
@@ -214,8 +220,10 @@ class Coaching:
             return label+self.view(link, day, is_client, minimum, practice, window)
         if command == "/coach_days":
             finish = day_arg(dates[1]) if len(dates)>1 else today
-            return label+self.days(link, day, finish, today, weekdays)
+            return label+self.days(link, day, finish, today, weekdays, demo=bool(demo))
         if command == "/coach_paid" and not is_client:
+            if self.demo_only:
+                raise Clarification("Сейчас доступна только учебная оплата клиентом через /pay.")
             self.require_active_day(link, day, today, weekdays)
             basis, = limited_fields(fields, 1)
             old = self.db.execute("SELECT basis FROM coach_payments WHERE link=? AND day=?", (link, str(day))).fetchone()
@@ -336,7 +344,7 @@ class Coaching:
             lines.append("Напоминание: "+status[notice[0]]+".")
         return "\n".join(lines)
 
-    def days(self, link, start, finish, today, weekdays):
+    def days(self, link, start, finish, today, weekdays, *, demo=False):
         if not (start<=finish<=today) or (finish-start).days>30:
             raise Clarification("Укажи период до 31 дня с датами не позже сегодняшней.")
         obligations = [start+dt.timedelta(days=i) for i in range((finish-start).days+1)
@@ -344,8 +352,11 @@ class Coaching:
         confirmed = self.db.execute("""
             SELECT COUNT(*) FROM coach_payments WHERE link=? AND day BETWEEN ? AND ?
         """, (link, str(start), str(finish))).fetchone()[0]
+        mode = "Учебный учёт, без списания." if demo else "Оплата напрямую трекеру."
+        if self.demo_only and not demo:
+            mode = "Рабочая оплата приостановлена."
         return (f"{start:%d.%m}–{finish:%d.%m} МСК. Активных дней: {len(obligations)} · {len(obligations)*100} ₽. "
-                f"Подтверждено: {confirmed} · {confirmed*100} ₽. Оплата напрямую трекеру.")
+                f"Подтверждено: {confirmed} · {confirmed*100} ₽. {mode}")
 
     def send_due(self, now):
         today, clock = now.date(), now.strftime("%H:%M")

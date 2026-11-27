@@ -155,6 +155,8 @@ class Sales(Pilot):
         return self.db.execute("SELECT COALESCE(SUM(amount),0) FROM pilot_refunds WHERE order_id=?", (i,)).fetchone()[0]
 
     def refund(self,i,order,amount,reference,user,now):
+        if not order[3] and not self.live_seller:
+            raise Clarification("Рабочие возвраты сейчас недоступны.")
         old=self.db.execute("SELECT order_id, amount FROM pilot_refunds WHERE seller=? AND reference=?",
                             (order[5],reference)).fetchone()
         if old:
@@ -168,7 +170,7 @@ class Sales(Pilot):
                         (i,order[5],reference,amount,user,now.isoformat()))
         self.db.execute("UPDATE pilot_refund_requests SET settled=? WHERE order_id=? AND settled IS NULL",
                         (now.isoformat(),i))
-        return f"Возврат {rub(amount)} подтверждён. Выдача и доступ управляются отдельно."
+        return f"{'Учебный возврат' if order[3] else 'Возврат'} {rub(amount)} подтверждён. Выдача и доступ управляются отдельно."
 
     def order_text(self,order,i):
         label=super().order_text(order,i)
@@ -232,7 +234,8 @@ class Sales(Pilot):
                               values).fetchone()[0]
         lines=[f"{'Учебные' if demo else 'Рабочие'} заказы · QR, внешняя сверка: {views}"]
         for kind,count,paid,total,refund in entries:
-            lines.append(f"{'Школа' if kind=='package' else 'Гранола'}: заявок {count}, оплат {paid}, "
+            label = {"package": "Школа", "tracking": "Трекинг", "granola": "Гранола"}[kind]
+            lines.append(f"{label}: заявок {count}, оплат {paid}, "
                          f"возвраты {rub(refund)}, нетто {rub(total-refund)}.")
         return "\n".join(lines)
 

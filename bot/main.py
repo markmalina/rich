@@ -11,6 +11,7 @@ import sqlite3
 import time
 
 from .coaching import Coaching
+from .demo_checkout import DemoCheckout
 from .event_write import EVENTS, INBOX, EventWrite, EventWrites, inbox_index
 from .group_face import GroupFace
 from .group_telegram import UPDATE_TYPES, GroupTelegram
@@ -72,6 +73,7 @@ class Bot:
         self.groups = None
         self.coaching = None
         self.pilot_orders = None
+        self.demo_checkout = None
         self.operations = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
         self.db = sqlite3.connect(directory / "bot.sqlite")
@@ -97,6 +99,8 @@ class Bot:
     def run(self):
         first_poll = True
         update_types = ["message"] + (UPDATE_TYPES if self.groups is not None else [])
+        if self.demo_checkout is not None:
+            update_types.append("callback_query")
         while True:
             try:
                 if self.groups is not None:
@@ -119,20 +123,7 @@ class Bot:
                 self.receive(updates)
                 for update in updates:
                     update_id = update["update_id"]
-                    message = update.get("message", {})
-                    if message.get("chat", {}).get("type") == "private":
-                        if self.groups is None or not self.groups.private_history(message):
-                            saved_at = self.db.execute(
-                                "SELECT received FROM receipts WHERE id = ?", (update_id,),
-                            ).fetchone()[0]
-                            self.dispatch(update_id, message, dt.datetime.fromisoformat(saved_at))
-                    elif self.groups is not None:
-                        try:
-                            self.groups.handle(update)
-                        except ProviderError as error:
-                            if error.provider != "Telegram" or error.status != 400:
-                                raise
-                            logging.warning("Отчёт RX: Telegram отклонил устаревший запрос или сообщение")
+                    self.process_update(update)
                     with self.db:
                         self.db.execute("INSERT OR REPLACE INTO state VALUES ('offset', ?)", (str(update_id + 1),))
                         self.db.execute("DELETE FROM receipts WHERE id = ?", (update_id,))
@@ -142,6 +133,25 @@ class Bot:
             except Exception as error:
                 logging.error("Обработка прервана: %s", type(error).__name__)
                 time.sleep(30)
+
+    def process_update(self, update):
+        update_id = update["update_id"]
+        (saved_at,) = self.db.execute("SELECT received FROM receipts WHERE id = ?", (update_id,)).fetchone()
+        received = dt.datetime.fromisoformat(saved_at)
+        if self.demo_checkout is not None and "callback_query" in update:
+            if self.demo_checkout.callback(update["callback_query"], received):
+                return
+        message = update.get("message", {})
+        if message.get("chat", {}).get("type") == "private":
+            if self.groups is None or not self.groups.private_history(message):
+                self.dispatch(update_id, message, received)
+        elif self.groups is not None:
+            try:
+                self.groups.handle(update)
+            except ProviderError as error:
+                if error.provider != "Telegram" or error.status != 400:
+                    raise
+                logging.warning("Отчёт RX: Telegram отклонил устаревший запрос или сообщение")
 
     def registered_sheet(self, user):
         if user == self.owner:
@@ -164,6 +174,8 @@ class Bot:
     def dispatch(self, update_id, message, received):
         user = message.get("from", {}).get("id")
         if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
+            return
+        if self.demo_checkout is not None and self.demo_checkout.message(user, message.get("text", ""), received):
             return
         if self.coaching is not None and self.coaching.handle(update_id, user, message, received):
             return
@@ -483,13 +495,16 @@ def main():
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
         bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner)
+        demo_checkout = os.environ.get("TRACKER_DEMO_CHECKOUT") == "1"
         if os.environ.get("TRACKER_COACHING") == "1":
-            bot.coaching = Coaching(bot.db, telegram, bot.owner)
+            bot.coaching = Coaching(bot.db, telegram, bot.owner, demo_only=demo_checkout)
         if os.environ.get("TRACKER_SCHOOL") == "1":
             seller = (os.environ.get("TRACKER_PILOT_SELLER", "").strip()
-                      if os.environ.get("TRACKER_COMMERCIAL_OPEN") == "1" else None)
+                      if not demo_checkout and os.environ.get("TRACKER_COMMERCIAL_OPEN") == "1" else None)
             pilot_class = Sales if os.environ.get("TRACKER_FULFILLMENT") == "1" else Pilot
             bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller)
+            if demo_checkout:
+                bot.demo_checkout = DemoCheckout(bot.db, telegram, bot.pilot_orders, bot.coaching)
         if os.environ.get("TRACKER_OPERATIONS") == "1":
             try:
                 bot.operations = Operations(bot.db, telegram, bot.owner, data)

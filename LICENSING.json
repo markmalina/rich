@@ -42,6 +42,8 @@
     "bot/ledger.py": "AGPL-3.0-only",
     "bot/main.py": "AGPL-3.0-only",
     "bot/coaching.py": "AGPL-3.0-only",
+    "bot/demo_checkout.py": "AGPL-3.0-only",
+    "bot/test_demo_checkout.py": "AGPL-3.0-only",
     "bot/test_coaching.py": "AGPL-3.0-only",
     "bot/pilot.py": "AGPL-3.0-only",
     "bot/school.py": "AGPL-3.0-only",
