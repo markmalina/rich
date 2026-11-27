@@ -75,11 +75,22 @@ class OperationsTest(unittest.TestCase):
         self.assertEqual(restored.execute("SELECT learner,text FROM school_work").fetchall(),[(9,"only B")])
         self.assertEqual(restored.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(),(2,))
         self.assertEqual(restored.execute("SELECT suspended FROM school_enrolments WHERE learner=8").fetchone(),(1,))
+        self.assertEqual(restored.execute("SELECT order_id FROM school_activity").fetchall(),[(b,)])
         self.now+=dt.timedelta(days=1)
         self.call(8,"/pilot_privacy school")
         with self.db:
             apply_privacy(self.db,self.ops.ledger)
         self.assertIsNone(self.db.execute("SELECT resolved FROM privacy_requests WHERE user=8").fetchone()[0])
+
+    def test_daily_snapshot_retries_after_a_temporary_failure(self):
+        with patch.object(self.ops,"snapshot",side_effect=[OSError("fixture"),self.root/"snapshot.sqlite"]) as snapshot:
+            with self.assertRaises(OSError):
+                self.ops.run_daily(self.now)
+            self.ops.run_daily(self.now+dt.timedelta(minutes=4))
+            snapshot.assert_called_once_with(self.now.date())
+            self.ops.run_daily(self.now+dt.timedelta(minutes=5))
+            self.ops.run_daily(self.now+dt.timedelta(minutes=6))
+            self.assertEqual(snapshot.call_count,2)
 
     def test_network_counts_unique_payors_and_hides_demo(self):
         Coaching(self.db,self.tg,7)

@@ -74,11 +74,33 @@ class School:
                 mentor INTEGER NOT NULL, text TEXT NOT NULL, submitted TEXT NOT NULL,
                 PRIMARY KEY(order_id,day,update_id)
             );
+            CREATE TABLE IF NOT EXISTS school_activity(
+                order_id INTEGER NOT NULL, active_on TEXT NOT NULL, PRIMARY KEY(order_id,active_on)
+            );
         """)
 
     def enrol(self, order_id, learner, mentor, starts):
         self.db.execute("INSERT OR IGNORE INTO school_enrolments(order_id,learner,mentor,starts,version) VALUES (?,?,?,?,?)",
                         (order_id, learner, mentor, str(starts), VERSION))
+
+    def mark_active(self, order_id, now):
+        day = now.astimezone(MOSCOW).date().isoformat()
+        self.db.execute("INSERT OR IGNORE INTO school_activity VALUES (?,?)", (order_id, day))
+
+    def cohorts(self, demo, through):
+        return self.db.execute("""
+            WITH checkpoints(day) AS (VALUES (7),(21)), eligible AS (
+                SELECT e.order_id,e.starts,e.version,c.day,date(e.starts,'+'||(c.day-1)||' days') AS target
+                FROM school_enrolments e JOIN pilot_orders o ON o.id=e.order_id CROSS JOIN checkpoints c
+                WHERE o.kind='package' AND o.state='paid' AND o.demo=?
+            )
+            SELECT starts,version,day,COUNT(*),SUM(CASE WHEN
+                EXISTS (SELECT 1 FROM school_activity a WHERE a.order_id=e.order_id AND a.active_on=e.target)
+                OR EXISTS (SELECT 1 FROM school_work w WHERE w.order_id=e.order_id AND substr(w.submitted,1,10)=e.target)
+                THEN 1 ELSE 0 END)
+            FROM eligible e WHERE target<=? GROUP BY starts,version,day
+            ORDER BY starts DESC,version,day LIMIT 32
+        """, (int(demo), through.isoformat())).fetchall()
 
     def handle(self, command, order_id, words, fields, user, now, update_id):
         item = self.db.execute("""
@@ -110,11 +132,14 @@ class School:
         if command == "/school_day":
             name, task = PROGRAMS[version][day-1]
             module = "Опыт клиента" if day<=7 else "Сопровождение" if day<=14 else "Продвижение"
+            if user == learner:
+                self.mark_active(order_id, now)
             return f"День {day}/21 · {module} · {name}\n{task}\nДата старта {starts} МСК. Версия {version}."
         if command in {"/school_work","/school_share"} and user == learner and len(fields)==1 and not finished:
             work = clean_space(fields[0])
             self.db.execute("INSERT OR IGNORE INTO school_work VALUES (?,?,?,?,?,?,?)",
                             (order_id,day,update_id,learner,work,int(command=="/school_share"),now.isoformat()))
+            self.mark_active(order_id, now)
             return ("Работа передана твоему наставнику." if command=="/school_share" else
                     "Личный черновик сохранён. Для проверки наставником нужно явно отправить /school_share.")
         if command == "/school_feedback" and user == mentor and len(fields)==1:
