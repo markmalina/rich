@@ -63,12 +63,14 @@ class ProvisionerTest(unittest.TestCase):
     def test_resumes_registered_pair_after_an_uncertain_append(self):
         pilot = PilotProvisioner(Mock(), "registry")
         pair = ["my-base", "my-face", 0]
+        state, save = {}, Mock()
         pilot.registry = Mock()
         pilot.registry.read.side_effect = [[REGISTRY_HEADERS], [REGISTRY_HEADERS, pair]]
         pilot.registry.append.side_effect = ProviderError("Google pilot", "connection")
         with self.assertRaises(ProviderError):
-            pilot.register(pair)
-        pilot.register(pair)
+            pilot.register(pair, state, save)
+        self.assertTrue(state["registry_appending"])
+        pilot.register(pair, state, save)
         pilot.registry.append.assert_called_once_with(REGISTRY, [pair])
 
     def test_rejects_registry_pair_that_shares_a_file_in_another_role(self):
@@ -76,8 +78,21 @@ class ProvisionerTest(unittest.TestCase):
         pilot.registry = Mock()
         pilot.registry.read.return_value = [REGISTRY_HEADERS, ["other-base", "my-base", 0]]
         with self.assertRaisesRegex(ProviderError, "registry pair conflict"):
-            pilot.register(["my-base", "my-face", 0])
+            pilot.register(["my-base", "my-face", 0], {}, Mock())
         pilot.registry.append.assert_not_called()
+
+    def test_definitively_rejected_registry_append_can_be_retried(self):
+        pilot = PilotProvisioner(Mock(), "registry")
+        pair = ["my-base", "my-face", 0]
+        state, save = {}, Mock()
+        pilot.registry = Mock()
+        pilot.registry.read.side_effect = [[REGISTRY_HEADERS], [REGISTRY_HEADERS], [REGISTRY_HEADERS, pair]]
+        pilot.registry.append.side_effect = [ProviderError("Google Sheets", 429), 1]
+        with self.assertRaises(ProviderError):
+            pilot.register(pair, state, save)
+        self.assertNotIn("registry_appending", state)
+        pilot.register(pair, state, save)
+        self.assertEqual(pilot.registry.append.call_count, 2)
 
 
 class ParticipantDispatchTest(unittest.TestCase):
