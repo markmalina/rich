@@ -38,8 +38,9 @@ function syncFace(event) {
     const routes = faceRoutes_(base);
     const source = faceSheet_({ id: baseId, gid: exported.getSheetId() });
     const rows = faceRows_(source, true);
-    const failed = [];
-    for (const route of routes) {
+    let failed = 0;
+    for (const [index, route] of routes.entries()) {
+      const label = 'Витрина ' + (index + 1);
       try {
         const target = faceSheet_(route);
         if (target.title !== 'События' || target.fileTitle !== route.name) {
@@ -47,13 +48,13 @@ function syncFace(event) {
         }
         const selected = rows.filter(row => route.categories.has(row[2].stringValue));
         writeFace_(target, selected);
-        console.log(route.name + ': сверено строк — ' + selected.length);
-      } catch (error) {
-        console.error(route.name + ': ' + error.message);
-        failed.push(route.name);
+        console.log(label + ': сверено строк — ' + selected.length);
+      } catch {
+        console.error(label + ': обновление не подтверждено.');
+        failed++;
       }
     }
-    if (failed.length) throw new Error('Обновление не подтверждено для: ' + failed.join(', '));
+    if (failed) throw new Error('Обновление не подтверждено для витрин — ' + failed);
   } finally {
     lock.releaseLock();
   }
