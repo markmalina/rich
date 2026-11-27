@@ -7,6 +7,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      wave:
+        description: Набор проверок
+        type: choice
+        default: all
+        options:
+          - all
+          - journal
+          - product
+          - recovery
 
 permissions:
   contents: read
@@ -19,7 +30,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m unittest discover -s . -p 'test_*.py' -v
-      - run: node --check < tracking/face-sync.gs
-      - run: node --test tracking/test_*.cjs
-      - run: docker build --tag rich-tracker-test .
+      - name: Полная проверка Python
+        if: github.event_name != 'workflow_dispatch' || inputs.wave == 'all'
+        run: python -m unittest discover -s . -p 'test_*.py' -v
+      - name: Дневник, голос, повтор и изоляция
+        if: github.event_name == 'workflow_dispatch' && inputs.wave == 'journal'
+        run: python -m unittest -v bot.test_voice_check bot.test_intake_guards bot.test_pilot_acceptance bot.test_tracker bot.test_onboarding bot.test_script_sheets tracking.test_bootstrap
+      - name: Учебная оплата, школа, сопровождение и выдача
+        if: github.event_name == 'workflow_dispatch' && inputs.wave == 'product'
+        run: python -m unittest -v bot.test_demo_checkout bot.test_coaching bot.test_group_reports bot.test_group_face bot.test_pilot_orders bot.test_sales
+      - name: Восстановление, диагностика и повтор доставки
+        if: github.event_name == 'workflow_dispatch' && inputs.wave == 'recovery'
+        run: python -m unittest -v bot.test_operations bot.test_pilot_acceptance bot.test_pilot_check
+      - name: Мост Google Sheets и публикация Face
+        if: github.event_name != 'workflow_dispatch' || inputs.wave == 'all' || inputs.wave == 'journal'
+        run: |
+          node --check < tracking/face-sync.gs
+          node --check < tracking/sheets-bridge.gs
+          node --test tracking/test_*.cjs
+      - name: Сборка контейнера
+        if: github.event_name != 'workflow_dispatch' || inputs.wave == 'all'
+        run: docker build --tag rich-tracker-test .

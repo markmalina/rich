@@ -96,6 +96,37 @@ class IntakeTest(unittest.TestCase):
                          [(-360, "RUB", "tg-7-1"), (-360, "RUB", "tg-7-2")])
         self.assertIsNone(self.bot.get("question"))
 
+    def test_ogg_document_with_generic_mime_roundtrips_and_rejects_other_content(self):
+        # A beginning-of-stream page carrying the Opus identification packet.
+        packet = b"OpusHead" + bytes([1, 1]) + bytes(9)
+        data = b"OggS\x00\x02" + bytes(20) + bytes([1, len(packet)]) + packet
+        self.tg.media.return_value = data
+        self.model.transcribe.return_value = "Учебная запись. Сделал десять отжиманий."
+        self.model.plan.return_value = plan("record", events=[event("activity", action="Отжимание", quantity=10)])
+        source = self.submit(1, document={"file_name": "ExErCiSe.OGA", "file_id": "fixture", "mime_type": "application/octet-stream"})
+        self.model.transcribe.assert_called_once_with("tg-7-1.ogg", data, "audio/ogg")
+        self.assertEqual((self.root / "tg-7-1.ogg").read_bytes(), data)
+        self.assertEqual(self.google.events[0][3:6], ["Отжимание", 10, "повт."])
+        self.submit(2, text="/original", reply_to_message=source)
+        self.assertEqual(self.tg.api.call_args.args, ("sendDocument", {"chat_id": 7}))
+
+        self.tg.media.return_value = b"not an Ogg stream"
+        self.submit(3, audio={"file_name": "voice.opus", "file_id": "wrong"})
+        self.assertIn("Opus или Vorbis", self.tg.message.call_args.args[1])
+        self.assertEqual(self.google.inbox[-1][4], "")
+        self.assertFalse((self.root / "tg-7-3.ogg").exists())
+        self.assertEqual(self.model.transcribe.call_count, 1)
+
+    def test_unbound_profile_media_gets_private_status_without_downloading_or_writing(self):
+        update = {"update_id": 12, "message": {"chat": {"id": 8, "type": "private"}, "from": {"id": 8},
+                                               "message_id": 1, "date": int(NOW.timestamp()), "voice": {"file_id": "v"}}}
+        self.bot.receive([update])
+        self.bot.process_update(update)
+        self.tg.media.assert_not_called()
+        self.model.transcribe.assert_not_called()
+        self.assertEqual(self.google.inbox, [])
+        self.assertIn("нет подключённой", self.tg.message.call_args.args[1])
+
     def test_manual_receipt_when_ai_is_off_and_repeat_keeps_one_payment(self):
         self.bot.model = None
         self.tg.media.return_value = b"synthetic PNG receipt"

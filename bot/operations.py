@@ -28,7 +28,7 @@ def table_exists(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
-def copy_database(source, destination, *, overwrite=False):
+def copy_database(source, destination, *, overwrite=False, deletion_ledger=None):
     destination=Path(destination)
     if not overwrite and destination.exists():
         raise FileExistsError("destination already exists")
@@ -39,6 +39,9 @@ def copy_database(source, destination, *, overwrite=False):
         target=sqlite3.connect(tmp)
         try:
             source.backup(target)
+            if deletion_ledger is not None:
+                with target:
+                    apply_privacy(target,deletion_ledger)
             if target.execute("PRAGMA quick_check").fetchone()!=("ok",):
                 raise RuntimeError("SQLite verification failed")
         finally:
@@ -212,12 +215,14 @@ class Operations:
         active = {code for code, relevant in flags.items() if relevant}
         with self.db:
             self.db.executemany("DELETE FROM operational_incidents WHERE code=?", [(code,) for code in previous-active])
-            self.db.executemany("INSERT INTO operational_incidents VALUES (?)", [(code,) for code in active-previous])
         if new := active-previous:
             try:
                 self.telegram.message(self.owner, "RX · эксплуатация. " + ", ".join(sorted(new)) + ". /pilot_health")
             except ProviderError as error:
                 logging.warning("Уведомление RX: %s", error)
+                return
+            with self.db:
+                self.db.executemany("INSERT OR IGNORE INTO operational_incidents VALUES (?)", [(code,) for code in new])
 
     def health(self, now=None):
         now = now or dt.datetime.now(MOSCOW)
@@ -283,11 +288,7 @@ def main():
     source=sqlite3.connect(args.source.resolve().as_uri()+"?mode=ro",uri=True)
     ledger=sqlite3.connect(args.deletion_ledger.resolve().as_uri()+"?mode=ro",uri=True)
     try:
-        copy_database(source,args.destination)
-        with sqlite3.connect(args.destination) as restored:
-            apply_privacy(restored,ledger)
-            if restored.execute("PRAGMA quick_check").fetchone()!=("ok",):
-                raise RuntimeError("restore verification failed")
+        copy_database(source,args.destination,deletion_ledger=ledger)
     finally:
         source.close()
         ledger.close()

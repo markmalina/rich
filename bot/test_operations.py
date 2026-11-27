@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 from .coaching import Coaching
 from .ledger import MOSCOW
 from .operations import Operations, apply_privacy, copy_database
+from .providers import ProviderError
 from .sales import Sales
 
 
@@ -65,13 +66,11 @@ class OperationsTest(unittest.TestCase):
         restored_path=self.root/"restored.sqlite"
         old=sqlite3.connect(source)
         self.addCleanup(old.close)
-        copy_database(old,restored_path)
+        copy_database(old,restored_path,deletion_ledger=self.ops.ledger)
         with self.assertRaises(FileExistsError):
             copy_database(old,restored_path)
         restored=sqlite3.connect(restored_path)
         self.addCleanup(restored.close)
-        with restored:
-            apply_privacy(restored,self.ops.ledger)
         self.assertEqual(restored.execute("SELECT learner,text FROM school_work").fetchall(),[(9,"only B")])
         self.assertEqual(restored.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(),(2,))
         self.assertEqual(restored.execute("SELECT suspended FROM school_enrolments WHERE learner=8").fetchone(),(1,))
@@ -82,6 +81,34 @@ class OperationsTest(unittest.TestCase):
             apply_privacy(self.db,self.ops.ledger)
         self.assertIsNone(self.db.execute("SELECT resolved FROM privacy_requests WHERE user=8").fetchone()[0])
 
+    def test_failed_restore_never_publishes_private_data_and_can_be_retried(self):
+        order=self.enrol(8,"fixture")
+        self.call(8,f"/school_work {order} 1 | fixture private work")
+        backup=self.ops.snapshot(self.now.date())
+        self.call(8,"/pilot_privacy school")
+        self.call(7,"/pilot_purge_school 8")
+        source=sqlite3.connect(backup.resolve().as_uri()+"?mode=ro",uri=True)
+        self.addCleanup(source.close)
+        destination=self.root/"restore"/"restored.sqlite"
+        invalid_ledger=sqlite3.connect(":memory:")
+        self.addCleanup(invalid_ledger.close)
+
+        with self.assertRaises(sqlite3.OperationalError):
+            copy_database(source,destination,deletion_ledger=invalid_ledger)
+        self.assertEqual(list(destination.parent.iterdir()),[])
+        self.assertEqual(source.execute("SELECT text FROM school_work").fetchone(),("fixture private work",))
+
+        def check_visibility(target,ledger):
+            self.assertFalse(destination.exists())
+            apply_privacy(target,ledger)
+
+        with patch("bot.operations.apply_privacy",side_effect=check_visibility):
+            copy_database(source,destination,deletion_ledger=self.ops.ledger)
+        restored=sqlite3.connect(destination)
+        self.addCleanup(restored.close)
+        self.assertEqual(restored.execute("SELECT COUNT(*) FROM school_work").fetchone(),(0,))
+        self.assertEqual(restored.execute("PRAGMA quick_check").fetchone(),("ok",))
+
     def test_daily_snapshot_retries_after_a_temporary_failure(self):
         with patch.object(self.ops,"snapshot",side_effect=[OSError("fixture"),self.root/"snapshot.sqlite"]) as snapshot:
             with self.assertRaises(OSError):
@@ -91,6 +118,22 @@ class OperationsTest(unittest.TestCase):
             self.ops.run_daily(self.now+dt.timedelta(minutes=5))
             self.ops.run_daily(self.now+dt.timedelta(minutes=6))
             self.assertEqual(snapshot.call_count,2)
+
+    def test_unacknowledged_alert_retries_then_stays_quiet_across_restart(self):
+        self.ops.alerts=True
+        self.tg.message.side_effect=[ProviderError("Telegram",503),True]
+        with patch("bot.operations.shutil.disk_usage",return_value=Mock(total=10**9,free=100)):
+            with self.assertLogs(level="WARNING"):
+                self.ops.check_alerts(self.now)
+            self.assertEqual(self.db.execute("SELECT code FROM operational_incidents").fetchall(),[])
+            self.ops.check_alerts(self.now+dt.timedelta(seconds=59))
+            self.assertEqual(self.tg.message.call_count,1)
+            self.ops.check_alerts(self.now+dt.timedelta(minutes=1))
+            self.assertEqual(self.db.execute("SELECT code FROM operational_incidents").fetchall(),[("disk_low",)])
+            restarted=Operations(self.db,self.tg,7,self.root,alerts=True)
+            self.addCleanup(restarted.ledger.close)
+            restarted.check_alerts(self.now+dt.timedelta(minutes=2))
+            self.assertEqual(self.tg.message.call_count,2)
 
     def test_network_counts_unique_payors_and_hides_demo(self):
         Coaching(self.db,self.tg,7)
