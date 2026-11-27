@@ -200,6 +200,12 @@ class Operations:
                               for i,k,a,d,s in self.db.execute("""
                 SELECT id,kind,total,demo,state FROM pilot_orders WHERE buyer=? ORDER BY id
             """,(user,))]
+        if table_exists(self.db,"pilot_tracking_days"):
+            record["tracking_days"]=[dict(order_id=i,day=d,practice=p,recorded=stamp)
+                                     for i,d,p,stamp in self.db.execute("""
+                SELECT t.order_id,t.day,t.practice,t.recorded FROM pilot_tracking_days t
+                JOIN pilot_orders o ON o.id=t.order_id WHERE o.buyer=? ORDER BY t.day,t.practice
+            """,(user,))]
         if table_exists(self.db,"coach_marks"):
             record["own_marks"]=[dict(day=d,value=v,recorded=stamp) for d,v,stamp in self.db.execute("""
                 SELECT day,value,published FROM coach_marks WHERE author=? ORDER BY published

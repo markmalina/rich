@@ -10,9 +10,12 @@ from .ledger import Clarification, MOSCOW
 from .school import SCHOOL_HELP, School, clean_space
 
 PACKAGE_PRICE = 990_000
+TRACKING_PRICE = 420_000
 PACK = 21
 PORTION = 80
 CHANNEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}")
+ORDER_TITLES = {"package": "Школа трекера + продвижение", "tracking": "Трекинг на 21 день",
+                "granola": "Гранола Малиновская"}
 
 
 def rub(value):
@@ -169,10 +172,10 @@ class Pilot:
 
     def order_text(self,order,i):
         buyer,kind,total,demo,source,seller,state=order
-        title="Школа трекера + продвижение" if kind=="package" else "Гранола Малиновская"
+        title=ORDER_TITLES[kind]
         return f"#{i} · {title} · {rub(total)} · {self.label(state)}. {'Учебный режим. ' if demo else ''}Продавец: {seller}."
 
-    def confirm(self,i,order,reference,start,operator,now):
+    def confirm(self,i,order,reference,start,operator,now,*,mentor=None):
         buyer,kind,total,demo,source,seller,state=order
         if state=="cancelled":
             raise Clarification("Отменённый заказ нельзя оплатить.")
@@ -189,9 +192,13 @@ class Pilot:
                         (i,seller,reference,total,operator,now.isoformat()))
         self.db.execute("UPDATE pilot_orders SET state='paid',updated=? WHERE id=?",(now.isoformat(),i))
         if kind=="package":
-            self.school.enrol(i,buyer,operator,start)
+            self.school.enrol(i,buyer,operator if mentor is None else mentor,start)
+        if kind in {"package", "tracking"}:
             self.db.execute("INSERT INTO pilot_kits VALUES (?,?,?,?)",(i,PACK,PORTION,now.isoformat()))
+        if kind=="package":
             return f"{'Учебная оплата' if demo else 'Оплата'} сверена. Одно место и набор {PACK} × {PORTION} г."
+        if kind=="tracking":
+            return f"Учебный трекинг открыт. Подарочный набор {PACK} × {PORTION} г."
         return "Отдельная покупка подтверждена."
 
     def extra(self,command,order_id,order,words,fields,user,now,update_id):
