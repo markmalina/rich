@@ -31,6 +31,7 @@ from .pilot_check import (
 )
 from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
 from .sales import Sales
+from .voice_check import VoiceCheck
 
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
@@ -43,6 +44,7 @@ MODEL_UNAVAILABLE = "Входящее сохранено. ИИ сейчас не
 MODEL_LIMIT = "Входящее сохранено. Дневной лимит ИИ исчерпан. Для ручной записи ответь на исходное сообщение командой /record."
 ORIGINAL_REF = re.compile(r"tg-([0-9]+)-[0-9]+\.(ogg|jpg|png|webp)")
 OGG_MIMES = {"audio/ogg", "application/ogg"}
+OGG_SUFFIXES = {".ogg", ".oga", ".opus"}
 AMOUNT_INSTRUCTION = re.compile(r"^(?:/amount(?:\s|$)|(?:исправь|поправь|исправление)\b)", re.IGNORECASE)
 AMOUNT_VALUE = re.compile(
     r"(?:/amount|(?:исправь|поправь|исправление)(?:\s+на)?)\s+"
@@ -56,16 +58,33 @@ def verify_ledger_schema(sheets):
         raise ProviderError("Google Sheets", "unsupported ledger schema")
 
 
+def media_mime(media):
+    return (media.get("mime_type") or "").partition(";")[0].strip().lower()
+
+
+def generic_ogg_file(media):
+    mime = media_mime(media)
+    return mime in {"", "application/octet-stream"} and Path(media.get("file_name") or "").suffix.lower() in OGG_SUFFIXES
+
+
+def ogg_audio_header(data):
+    # The first packet on the beginning-of-stream page identifies the codec.
+    if len(data) < 28 or not data.startswith(b"OggS\x00") or not data[5] & 2:
+        return False
+    packet_start = 27 + data[26]
+    return data[26] > 0 and data.startswith((b"OpusHead", b"\x01vorbis"), packet_start)
+
+
 def attachment(message):
     for key in ("voice", "audio", "document"):
         if media := message.get(key):
-            mime = media.get("mime_type")
-            if mime in OGG_MIMES or (key == "voice" and not mime):
+            mime = media_mime(media)
+            if mime in OGG_MIMES or (key == "voice" and not mime) or generic_ogg_file(media):
                 return media, "audio/ogg", ".ogg"
     if photos := message.get("photo"):
         return photos[-1], "image/jpeg", ".jpg"
     if image := message.get("document"):
-        mime = image.get("mime_type")
+        mime = media_mime(image)
         if mime in IMAGE_TYPES:
             return image, mime, IMAGE_TYPES[mime]
     return None, None, None
@@ -83,6 +102,7 @@ class Bot:
         self.coaching = None
         self.pilot_orders = None
         self.demo_checkout = None
+        self.voice_check = None
         self.operations = None
         self.ai_quota = None
         self.instructions = (ROOT / "tracking/telegram-prompt.md").read_text(encoding="utf-8")
@@ -192,6 +212,8 @@ class Bot:
         user = message.get("from", {}).get("id")
         if type(user) is not int or user <= 0 or message["chat"].get("id") != user:
             return
+        if self.voice_check is not None and self.voice_check.handle(user, message):
+            return
         if self.demo_checkout is not None and self.demo_checkout.message(user, message.get("text", ""), received):
             return
         if self.coaching is not None and self.coaching.handle(update_id, user, message, received):
@@ -219,6 +241,11 @@ class Bot:
                 bot.db.close()
         elif message.get("text") == "/status":
             self.telegram.message(user, "Этот дневник eRex привязан к другому Telegram-профилю.")
+        elif any(message.get(kind) for kind in ("voice", "audio", "document", "photo")):
+            reply = "У этого профиля пока нет подключённой личной «БАЗЫ». Вложение осталось в чате Telegram."
+            if self.demo_checkout is not None:
+                reply += " Проверить передачу учебного голосового можно через /voice_check."
+            self.telegram.message(user, reply)
 
     def capture(self, origin, received, source, text, file_ref):
         found = inbox_index(self.sheets, origin)
@@ -233,6 +260,8 @@ class Bot:
         final = self.directory / f"{origin}{suffix}"
         if not final.exists():
             payload = self.telegram.media(media["file_id"], media.get("file_size"))
+            if suffix == ".ogg" and generic_ogg_file(media) and not ogg_audio_header(payload):
+                raise ProviderError("Telegram media", "invalid ogg")
             fd, name = tempfile.mkstemp(dir=self.directory, prefix=".attachment-")
             temp = Path(name)
             try:
@@ -383,12 +412,13 @@ class Bot:
             try:
                 original = self.save_receipt_file(origin, suffix, media)
             except ProviderError as error:
-                if error.status in {"size", 400, 404}:
-                    self.sheets.update(f"'{INBOX}'!E{idx}", [[""]])
-                    self.reply(update_id, chat, "Входящее принято. Пришли вложение повторно, размером до 18 МиБ.",
-                               self.get("question"))
-                    return
-                raise
+                if error.status not in {"invalid ogg", "size", 400, 404}:
+                    raise
+                self.sheets.update(f"'{INBOX}'!E{idx}", [[""]])
+                reason = ("Пришли запись в формате OGG с аудио Opus или Vorbis." if error.status == "invalid ogg"
+                          else "Входящее принято. Пришли вложение повторно, размером до 18 МиБ.")
+                self.reply(update_id, chat, reason, self.get("question"))
+                return
         if mime == "audio/ogg":
             existing = self.sheets.read(f"'{INBOX}'!F{idx}")
             extracted = value_at(existing[0], 0) if existing else ""
@@ -609,6 +639,7 @@ def main():
             pilot_class = Sales if os.environ.get("TRACKER_FULFILLMENT") == "1" else Pilot
             bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller)
             if demo_checkout:
+                bot.voice_check = VoiceCheck(telegram)
                 bot.demo_checkout = DemoCheckout(bot.db, telegram, bot.pilot_orders, bot.coaching)
         if os.environ.get("TRACKER_OPERATIONS") == "1":
             try:

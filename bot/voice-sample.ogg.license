@@ -1,0 +1,8 @@
+SPDX-FileCopyrightText: 2026 System Rich contributors
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+Synthetic Russian voice fixture. No human voice or user data.
+Text: Учебная запись. Я сделал пятнадцать приседаний.
+Synthesizer: eSpeak Russian voice, speak.js 9c6f642f7d78bab51d16b2e8b79cdf205643ec35.
+Generation: speak -v ru -s 148 -w sample.wav 'Учебная запись. Я сделал пятнадцать приседаний.'
+Encoding: ffmpeg -i sample.wav -map_metadata -1 -fflags +bitexact -flags:a +bitexact -ar 24000 -ac 1 -c:a libopus -application voip -b:a 16k -f ogg voice-sample.ogg

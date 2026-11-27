@@ -99,6 +99,8 @@ class LedgerTest(unittest.TestCase):
 
     def test_media_formats(self):
         self.assertEqual(attachment({"voice": {"file_id": "v"}})[1], "audio/ogg")
+        self.assertEqual(attachment({"audio": {"file_id": "v", "mime_type": "Audio/OGG; codecs=opus"}})[1], "audio/ogg")
+        self.assertIsNone(attachment({"document": {"file_id": "v", "file_name": "speech.ogg", "mime_type": "text/plain"}})[1])
         self.assertEqual(attachment({"photo": [{"file_id": "p"}]})[1], "image/jpeg")
         self.assertEqual(attachment({"document": {"file_id": "p", "mime_type": "image/png"}})[1], "image/png")
 

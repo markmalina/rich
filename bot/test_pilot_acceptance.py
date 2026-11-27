@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 System Rich contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 
+from contextlib import closing
 import datetime as dt
 from pathlib import Path
 import re
@@ -13,7 +14,7 @@ from .group_telegram import GroupTelegram, configured_groups
 from .ledger import MOSCOW
 from .main import Bot
 from .onboarding import DRIVE_URL, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
-from .providers import SHEETS_URL
+from .providers import ProviderError, SHEETS_URL
 from .test_tracker import FakeGoogle, event
 
 CHAT = -1000012345
@@ -246,3 +247,66 @@ class PilotAcceptanceTest(unittest.TestCase):
                     self.assertEqual(telegram.calls[-2][1]["text"], "За эту страницу нет доступных групповых отчётов.")
             finally:
                 restarted.db.close()
+
+    def test_replayed_participant_batch_recovers_after_restart_without_crossing_journals(self):
+        google, telegram, model = PilotGoogle(), PilotTelegram(), Mock()
+        users = list(range(100, 130))
+        updates = [message(i + 1, users[i % len(users)], f"Факт {i}", message_id=i // len(users) + 1)
+                   for i in range(100)]
+        lost_origin = f"tg-{users[1]}-1"
+        pending_book = None
+        append_attempts = 0
+
+        def sheets_request(session, provider, method, url, **kwargs):
+            nonlocal pending_book, append_attempts
+            address = unquote(url)
+            values = kwargs.get("json", {}).get("values", [])
+            if address.endswith("/'События'!A:O:append") and any(row[8] == lost_origin for row in values):
+                append_attempts += 1
+                google.request(session, provider, method, url, **kwargs)
+                pending_book = address.split("/values/", 1)[0]
+                raise ProviderError("Google Sheets", "connection")
+            if pending_book and address == pending_book + "/values/'События'!A2:O":
+                raise ProviderError("Google Sheets", "connection")
+            return google.request(session, provider, method, url, **kwargs)
+
+        def plan(instructions, info, schema, image):
+            if info["text"] == "Факт 0":
+                raise ProviderError("OpenAI", 429)
+            recorded = event("fact", action=READING, summary=info["text"], quantity=1, unit="мин")
+            return {"decision": "record", "continues": False, "message": "", "events": [recorded]}
+
+        model.plan.side_effect = plan
+        pilot = PilotProvisioner(google.session, "registry")
+        with (tempfile.TemporaryDirectory() as directory,
+              patch("bot.onboarding.request", side_effect=google.request),
+              patch("bot.providers.request", side_effect=sheets_request)):
+            bot = Bot(telegram, None, model, Path(directory), OWNER, pilot)
+            with closing(bot.db):
+                bot.receive(updates)
+                for update in updates:
+                    bot.process_update(update)
+                    bot.process_update(update)
+                pending = bot.db.execute("SELECT origin FROM event_writes").fetchall()
+                self.assertCountEqual(pending, [(f"tg-{users[1]}-{i}",) for i in range(1, 5)])
+                self.assertTrue(any(body["chat_id"] == users[0] and "/record" in body["text"]
+                                    for method, body in telegram.calls if method == "sendMessage"))
+
+            pending_book = None
+            restarted = Bot(telegram, None, model, Path(directory), OWNER, pilot)
+            with closing(restarted.db):
+                for _ in range(2):  # The poller reconciles at most two batches per pass.
+                    restarted.reconcile_events(101)
+                manual = message(101, users[0], f"/record {READING} | Факт 0 | 1 мин", message_id=5)
+                manual["message"]["reply_to_message"] = updates[0]["message"]
+                restarted.receive([manual])
+                restarted.process_update(manual)
+                restarted.process_update(manual)
+                self.assertEqual(restarted.db.execute("SELECT COUNT(*) FROM event_writes").fetchone(), (0,))
+                self.assertEqual(append_attempts, 1)
+                self.assertEqual(model.plan.call_count, len(updates))
+                for i, user in enumerate(users):
+                    rows = restarted.registered_sheet(user).read("'События'!A2:O")
+                    expected = [(f"Факт {j}", f"tg-{user}-{k + 1}", f"tg-{user}-{k + 1}-e1")
+                                for k, j in enumerate(range(i, len(updates), len(users)))]
+                    self.assertCountEqual([(row[2], row[8], row[11]) for row in rows], expected)

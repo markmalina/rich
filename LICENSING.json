@@ -88,7 +88,11 @@
     "bot/event_write.py": "AGPL-3.0-only",
     "bot/test_pilot_acceptance.py": "AGPL-3.0-only",
     "bot/pilot_check.py": "AGPL-3.0-only",
-    "bot/test_pilot_check.py": "AGPL-3.0-only"
+    "bot/test_pilot_check.py": "AGPL-3.0-only",
+    "bot/voice_check.py": "AGPL-3.0-only",
+    "bot/test_voice_check.py": "AGPL-3.0-only",
+    "bot/voice-sample.ogg": "CC-BY-SA-4.0",
+    "bot/voice-sample.ogg.license": "CC-BY-SA-4.0"
   },
   "license_texts": {
     "AGPL-3.0-only": "LICENSES/AGPL-3.0-only.txt",
