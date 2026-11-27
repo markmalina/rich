@@ -93,3 +93,34 @@ class SchoolPilotTest(unittest.TestCase):
             self.db.execute("INSERT INTO coach_payments VALUES (2,?,?,8,?)",
                             ("2026-11-26","reconciled",self.now.isoformat()))
         self.assertIn("Подтверждено оплаченных дней: 1",self.cmd(8,"/school_status 1"))
+
+    def test_retention_counts_calendar_checkpoints_and_separates_cohorts(self):
+        self.pilot.live_seller="Учебная модель рабочего продавца"
+        for buyer,mode,start in ((8,"demo",""),(9,"demo",""),(10,"demo",""),
+                                 (11,"demo","2026-12-12"),(12,"live","")):
+            self.cmd(7,f"/pilot_offer {buyer} {mode}")
+            order=buyer-7
+            if buyer!=10:
+                self.cmd(7,f"/pilot_paid {order} 9900 {start} | demo-{buyer}")
+        with self.db:
+            self.db.execute("UPDATE pilot_orders SET state='cancelled' WHERE buyer=10")
+
+        self.cmd(8,"/school_day 1 1",6)
+        self.cmd(8,"/school_day 1 1",6)
+        self.cmd(7,"/school_day 2 7",6)
+        self.cmd(12,"/school_day 5 7",6)
+        self.cmd(8,"/school_work 1 7 | Поздняя работа",20)
+        with self.db:
+            self.db.execute("UPDATE school_enrolments SET suspended=1 WHERE learner=9")
+            self.db.execute("DELETE FROM school_activity WHERE order_id=1 AND active_on='2026-12-16'")
+
+        demo=self.cmd(7,"/pilot_cohorts demo",20)
+        self.assertIn("день 7: 1 из 2",demo)
+        self.assertIn("день 21: 1 из 2",demo)
+        self.assertNotIn("2026-12-12",demo)
+        live=self.cmd(7,"/pilot_cohorts live",20)
+        self.assertIn("день 7: 1 из 1",live)
+        self.assertIn("день 21: 0 из 1",live)
+        self.assertNotIn("день 21",self.cmd(7,"/pilot_cohorts demo 2026-12-02",20))
+        self.assertIn("Требуется роль оператора",self.cmd(8,"/pilot_cohorts demo",20))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_activity WHERE order_id=1").fetchone(),(1,))

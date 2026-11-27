@@ -75,7 +75,7 @@ class Pilot:
             self.telegram.message(user,"Сократи команду до 1600 знаков.")
             return True
         reads={"/school","/pilot","/pilot_order","/school_day","/school_history","/school_status",
-               "/pilot_delivery","/pilot_margin","/pilot_metrics"}
+               "/pilot_delivery","/pilot_margin","/pilot_metrics","/pilot_cohorts"}
         try:
             with self.db:
                 replay = self.db.execute("SELECT result FROM pilot_ops WHERE update_id=? AND user=?",
@@ -103,7 +103,22 @@ class Pilot:
             return ("Оператор школы. /pilot_offer ID demo создаёт учебный заказ. "
                     "/pilot_offer ID live — рабочий заказ, когда включён продавец. "
                     "/pilot_paid ID сумма [дата старта] | основание. /pilot_order ID — сверка. "
+                    "/pilot_cohorts demo или live — возвращение к учёбе на 7-й и 21-й день. "
                     "/school_finish ID, /school_feedback ID день | комментарий.")
+        if command == "/pilot_cohorts":
+            self.require_operator(user)
+            if fields or len(words) not in {1,2} or words[0] not in {"demo","live"}:
+                raise Clarification("Выбери /pilot_cohorts demo или live. После режима можно указать дату отчёта.")
+            through = day_arg(words[1]) if len(words)==2 else today
+            if through > today:
+                raise Clarification("Дата отчёта не может быть позже сегодняшней.")
+            demo=words[0]=="demo"
+            lines=[f"{'Учебные' if demo else 'Рабочие'} потоки на {through:%d.%m.%Y} МСК."]
+            lines.extend(f"Старт {start} · {version} · день {day}: {active} из {eligible}."
+                         for start,version,day,eligible,active in self.school.cohorts(demo,through))
+            if len(lines)==1:
+                lines.append("Потоков, дошедших до контрольного дня, пока нет.")
+            return "\n".join(lines)
         if command == "/pilot_offer":
             self.require_operator(user)
             if len(words)!=2 or not valid_id(words[0]) or words[1] not in {"demo","live"}:

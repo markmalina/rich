@@ -66,6 +66,8 @@ def apply_privacy(db, ledger):
         db.execute(f"UPDATE school_enrolments SET suspended=1 WHERE order_id IN ({orders})",(user,day))
         db.execute(f"DELETE FROM school_work WHERE order_id IN ({orders})",(user,day))
         db.execute(f"DELETE FROM school_comments WHERE order_id IN ({orders})",(user,day))
+        if table_exists(db,"school_activity"):
+            db.execute(f"DELETE FROM school_activity WHERE order_id IN ({orders})",(user,day))
         if table_exists(db,"privacy_requests"):
             db.execute("UPDATE privacy_requests SET resolved=? WHERE user=? AND kind='school' "
                        "AND resolved IS NULL AND requested<=?", (day,user,day))
@@ -86,6 +88,7 @@ class Operations:
         self.storage.mkdir(mode=0o700,parents=True,exist_ok=True)
         self.ledger_path=self.storage/"erasures.sqlite"
         self._last_day=None
+        self._next_backup_attempt=None
         with self.db:
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS privacy_requests(
@@ -110,9 +113,15 @@ class Operations:
 
     def run_daily(self,now):
         day=now.astimezone(MOSCOW).date()
-        if day!=self._last_day:
-            self._last_day=day
+        if day==self._last_day or (self._next_backup_attempt and now<self._next_backup_attempt):
+            return
+        try:
             self.snapshot(day)
+        except (OSError, sqlite3.Error, RuntimeError):
+            self._next_backup_attempt=now+dt.timedelta(minutes=5)
+            raise
+        self._last_day=day
+        self._next_backup_attempt=None
 
     def handle(self,update_id,user,message,now):
         cmd,_,arg=message.get("text","").strip().partition(" ")
@@ -239,6 +248,11 @@ class Operations:
             record["school_work"]=[dict(order_id=i,day=d,text=t,shared=bool(s),submitted=stamp)
                                    for i,d,t,s,stamp in self.db.execute("""
                 SELECT order_id,day,text,shared,submitted FROM school_work WHERE learner=? ORDER BY submitted
+            """,(user,))]
+        if table_exists(self.db,"school_activity"):
+            record["school_activity"]=[dict(order_id=i,active_on=stamp) for i,stamp in self.db.execute("""
+                SELECT a.order_id,a.active_on FROM school_activity a
+                JOIN school_enrolments e ON e.order_id=a.order_id WHERE e.learner=? ORDER BY a.active_on
             """,(user,))]
         if table_exists(self.db,"pilot_orders"):
             record["orders"]=[dict(order_id=i,kind=k,amount_minor=a,currency="RUB",demo=bool(d),state=s)
