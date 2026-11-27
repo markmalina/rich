@@ -103,7 +103,22 @@ class VoiceCheckTest(unittest.TestCase):
             self.dispatch(**sample)
         first = self.tg.message.call_args.args[1]
         self.tg.message.side_effect = None
-        self.dispatch(text="/voice_verify", reply_to_message={**sample, "message_id": 41})
+        self.dispatch(**sample)
         self.tg.message.assert_called_with(3, first)
         self.assertIn("входящее голосовое Telegram", first)
         self.tg.media.assert_called_once()
+
+    def test_reply_and_forward_of_one_sample_receive_separate_evidence(self):
+        sample = self.issue()
+        reply = {"text": "/voice_verify", "reply_to_message": {**sample, "message_id": 41}}
+        self.dispatch(**reply)
+        reply_receipt = self.tg.message.call_args.args[1]
+        self.dispatch(**sample)
+        forward_receipt = self.tg.message.call_args.args[1]
+        self.assertIn("файл голосового из ответа", reply_receipt)
+        self.assertIn("входящее голосовое Telegram", forward_receipt)
+        self.dispatch(**reply)
+        self.tg.message.assert_called_with(3, reply_receipt)
+        self.dispatch(**sample)
+        self.tg.message.assert_called_with(3, forward_receipt)
+        self.assertEqual(self.tg.media.call_count, 2)

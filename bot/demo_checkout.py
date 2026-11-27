@@ -6,6 +6,7 @@
 from dataclasses import dataclass
 import datetime as dt
 import re
+from uuid import uuid4
 
 from .ledger import Clarification, MOSCOW
 from .pilot import ORDER_TITLES, PACK, PORTION, TRACKING_PRICE, rub
@@ -173,7 +174,8 @@ class DemoCheckout:
         order = self.get_order(order_id, user)
         if order[6] == "awaiting":
             today = now.astimezone(MOSCOW).date()
-            self.pilot.confirm(order_id, order, f"demo-self:{order_id}", today, user, now, mentor=self.pilot.owner)
+            self.pilot.confirm(order_id, order, f"demo-self:{order_id}:{uuid4().hex}", today, user, now,
+                               mentor=self.pilot.owner)
         return self.after_payment(order_id, order[1], now)
 
     def after_payment(self, order_id, kind, now):
@@ -195,11 +197,11 @@ class DemoCheckout:
         """, (link, user)).fetchone()
         if not row or not self.coaching.active_on(link, today, row[1]):
             raise Clarification("Доступного учебного дня в этой связи нет.")
+        if confirmed:
+            self.db.execute("INSERT INTO coach_payments VALUES (?,?,?,?,?) ON CONFLICT(link,day) DO NOTHING",
+                            (link, str(today), f"demo-self:{target}:{uuid4().hex}", row[0], now.isoformat()))
         paid = self.db.execute("SELECT 1 FROM coach_payments WHERE link=? AND day=?", (link, str(today))).fetchone()
-        if confirmed and not paid:
-            self.db.execute("INSERT OR IGNORE INTO coach_payments VALUES (?,?,?,?,?)",
-                            (link, str(today), f"demo-self:{target}", row[0], now.isoformat()))
-        if confirmed or paid:
+        if paid:
             return Screen(f"Учебная оплата дня 100 ₽ подтверждена. Деньги не списаны. Продолжить: /coach_report {link}.")
         return Screen(f"День сопровождения · 100 ₽ · {today:%d.%m.%Y} МСК.\n{NOTICE}",
                       (("Я оплатил", f"coachpaid:{link}:{target}"),))

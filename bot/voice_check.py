@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 System Rich contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
 import secrets
@@ -24,7 +24,7 @@ class Challenge:
     token: str
     message_id: int
     file_key: str
-    result: str = ""
+    receipts: dict[str, str] = field(default_factory=dict)
 
 
 class VoiceCheck:
@@ -39,7 +39,7 @@ class VoiceCheck:
     def issue(self, user):
         now = self.clock()
         self.challenges = {key: value for key, value in self.challenges.items() if value.expires > now}
-        if user in self.challenges and not self.challenges[user].result:
+        if user in self.challenges and not self.challenges[user].receipts:
             self.telegram.message(user, "Образец уже отправлен. " + INSTRUCTIONS)
             return
         if len(self.challenges) >= 256 and user not in self.challenges:
@@ -74,8 +74,9 @@ class VoiceCheck:
                 or (reply and sample_message.get("message_id") != challenge.message_id)):
             self.telegram.message(user, INVALID)
             return True
-        if challenge.result:
-            self.telegram.message(user, challenge.result)
+        route = "файл голосового из ответа" if reply else "входящее голосовое Telegram"
+        if route in challenge.receipts:
+            self.telegram.message(user, challenge.receipts[route])
             return True
 
         try:
@@ -88,8 +89,8 @@ class VoiceCheck:
         if digest != hashlib.sha256(expected).hexdigest():
             self.telegram.message(user, "Файл Telegram отличается от учебного оригинала. Проверка не пройдена.")
             return True
-        route = "файл голосового из ответа" if reply else "входящее голосовое Telegram"
-        challenge.result = (f"Проверено: {route}. Получено {len(data)} байт, SHA-256 {digest}. "
-                            "Байты совпали с учебным оригиналом. Расшифровка и дневник не использовались.")
-        self.telegram.message(user, challenge.result)
+        receipt = (f"Проверено: {route}. Получено {len(data)} байт, SHA-256 {digest}. "
+                   "Байты совпали с учебным оригиналом. Расшифровка и дневник не использовались.")
+        challenge.receipts[route] = receipt
+        self.telegram.message(user, receipt)
         return True

@@ -66,7 +66,9 @@ class DemoCheckoutTest(unittest.TestCase):
         pay = self.click_label(8, "Я оплатил")
         self.callback(8, pay)
         self.assertIn("день 1 из 21", self.screen()["text"])
-        self.assertEqual(self.db.execute("SELECT recorder,reference FROM pilot_receipts").fetchall(), [(8, "demo-self:1")])
+        [(recorder, reference)] = self.db.execute("SELECT recorder,reference FROM pilot_receipts").fetchall()
+        self.assertEqual(recorder, 8)
+        self.assertRegex(reference, r"^demo-self:1:[0-9a-f]{32}$")
         self.assertEqual(self.db.execute("SELECT units,grams FROM pilot_kits").fetchall(), [(21, 80)])
         self.assertEqual(self.db.execute("SELECT count(*) FROM school_enrolments").fetchone(), (0,))
         mark = self.click_label(8, "Отметить: Питание")
@@ -107,6 +109,19 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertIn("Гранола: заявок 1, оплат 1", self.bot.pilot_orders.metrics(True, None))
         self.assertNotIn("оплат 1", self.bot.pilot_orders.metrics(False, None))
 
+    def test_old_operator_reference_does_not_block_a_new_self_confirmation(self):
+        self.message(7, "/pilot_goods 8 demo 1 80 350 | sample")
+        self.message(7, "/pilot_paid 1 350 | demo-self:2")
+        self.message(8, "/start tracking")
+        self.click_label(8, "Оплатить")
+        paid = self.click_label(8, "Я оплатил")
+        self.callback(8, paid)
+        self.assertIn("день 1 из 21", self.screen()["text"])
+        rows = self.db.execute("SELECT order_id,reference FROM pilot_receipts ORDER BY order_id").fetchall()
+        self.assertEqual(rows[0], (1, "demo-self:2"))
+        self.assertEqual(len(rows), 2)
+        self.assertRegex(rows[1][1], r"^demo-self:2:[0-9a-f]{32}$")
+
     def test_no_bypass_to_cancelled_live_foreign_or_group_order(self):
         self.message(8, "/start tracking")
         self.callback(7, "dp:paid:1")
@@ -143,6 +158,19 @@ class DemoCheckoutTest(unittest.TestCase):
         ops = Operations(self.db, self.tg, 7, self.bot.directory)
         self.addCleanup(ops.ledger.close)
         self.assertIn("Уникальных платящих 0", ops.network(self.now.date()))
+
+        self.now += dt.timedelta(days=1)
+        with self.db:
+            self.db.execute("INSERT INTO coach_payments VALUES (?,?,?,?,?)",
+                            (1, "2026-11-26", "demo-self:20261128", 7, self.now.isoformat()))
+        self.message(8, "/pay")
+        self.click_label(8, "Оплатить день у трекера #1 · 100 ₽")
+        confirm = self.click_label(8, "Я оплатил")
+        self.callback(8, confirm)
+        self.assertIn("подтверждена", self.screen()["text"])
+        [(basis,)] = self.db.execute("SELECT basis FROM coach_payments WHERE link=1 AND day='2026-11-28'").fetchall()
+        self.assertRegex(basis, r"^demo-self:20261128:[0-9a-f]{32}$")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (3,))
 
 
 if __name__ == "__main__":
