@@ -29,7 +29,7 @@ from .pilot_check import (
     BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, legacy_google_settings, report_config,
     verify_telegram,
 )
-from .providers import Model, ProviderError, ScriptSheets, Sheets, Telegram
+from .providers import Model, ProviderError, RecipientUnavailable, ScriptSheets, Sheets, Telegram
 from .sales import Sales
 from .voice_check import VoiceCheck
 
@@ -160,7 +160,16 @@ class Bot:
                 self.receive(updates)
                 for update in updates:
                     update_id = update["update_id"]
-                    self.process_update(update)
+                    try:
+                        self.process_update(update)
+                    except RecipientUnavailable as error:
+                        callback = update.get("callback_query", {})
+                        message = callback.get("message", update.get("message", {}))
+                        chat = message.get("chat", {})
+                        sender = callback.get("from", message.get("from", {}))
+                        if chat.get("type") != "private" or chat.get("id") != error.chat_id or sender.get("id") != error.chat_id:
+                            raise
+                        logging.warning("Telegram: адресат больше не принимает личные ответы")
                     with self.db:
                         self.db.execute("INSERT OR REPLACE INTO state VALUES ('offset', ?)", (str(update_id + 1),))
                         self.db.execute("DELETE FROM receipts WHERE id = ?", (update_id,))
@@ -427,7 +436,7 @@ class Bot:
                     if problem := self.allow_model():
                         self.reply(update_id, chat, problem, self.get("question"))
                         return
-                    extracted = self.model.transcribe(original.name, original.read_bytes(), mime)
+                    extracted = self.model.transcribe("voice.ogg", original.read_bytes(), mime)
             except ProviderError:
                 self.reply(update_id, chat, MODEL_UNAVAILABLE, self.get("question"))
                 return

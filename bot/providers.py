@@ -19,14 +19,20 @@ class ProviderError(RuntimeError):
         self.status = status
 
 
-def request(session, provider, method, url, **kwargs):
+class RecipientUnavailable(ProviderError):
+    def __init__(self, chat_id):
+        super().__init__("Telegram", 403)
+        self.chat_id = chat_id
+
+
+def request(session, provider, method, url, *, inspect_forbidden=False, **kwargs):
     import requests
 
     try:
         response = session.request(method, url, **kwargs)
     except requests.RequestException:
         raise ProviderError(provider, "connection") from None
-    if not response.ok:
+    if not response.ok and not (inspect_forbidden and response.status_code == 403):
         raise ProviderError(provider, response.status_code)
     return response
 
@@ -39,11 +45,23 @@ class Telegram:
 
     def api(self, method, body, **kwargs):
         options = {"data": body, **kwargs} if "files" in kwargs else {"json": body}
-        response = request(self.session, "Telegram", "POST",
-                           f"{self.base}/bot{self.token}/{method}", timeout=45, **options).json()
-        if not response.get("ok"):
-            raise ProviderError("Telegram", response.get("error_code", "request rejected"))
-        return response["result"]
+        chat = body.get("chat_id")
+        delivery = method in {"sendMessage", "sendVoice", "sendDocument"} and type(chat) is int and chat > 0
+        response = request(self.session, "Telegram", "POST", f"{self.base}/bot{self.token}/{method}",
+                           timeout=45, inspect_forbidden=delivery, **options)
+        try:
+            result = response.json()
+        except ValueError:
+            raise ProviderError("Telegram", response.status_code) from None
+        if not isinstance(result, dict):
+            raise ProviderError("Telegram", response.status_code)
+        if not response.ok or not result.get("ok"):
+            status = response.status_code if not response.ok else result.get("error_code", "request rejected")
+            if (delivery and status == 403 and result.get("error_code") == 403 and
+                    result.get("description") in ("Forbidden: bot was blocked by the user", "Forbidden: user is deactivated")):
+                raise RecipientUnavailable(chat)
+            raise ProviderError("Telegram", status)
+        return result["result"]
 
     def message(self, chat_id, text):
         return self.api("sendMessage", {"chat_id": chat_id, "text": text[:3900]})

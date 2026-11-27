@@ -5,6 +5,7 @@ import datetime as dt
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -12,7 +13,8 @@ from .event_write import EventWrite
 from .group_reports import build_report
 from .ledger import EVENT_FIELDS, INBOX_HEADERS, MOSCOW, QUERY_FIELDS, Clarification, action_catalog, ledger_rows, summarize_query
 from .main import EVENT_UNCONFIRMED, Bot, attachment
-from .providers import ProviderError
+from .providers import ProviderError, RecipientUnavailable, Telegram
+from .voice_check import VoiceCheck
 
 NOW = dt.datetime(2026, 11, 23, 14, 5, tzinfo=MOSCOW)
 ACTIONS = {
@@ -358,3 +360,71 @@ class TelegramOnlyTest(unittest.TestCase):
                 self.assertIn("Пришли сообщение заново", telegram.message.call_args_list[1].args[1])
             finally:
                 bot.db.close()
+
+class TelegramDeliveryTest(unittest.TestCase):
+    def setUp(self):
+        # All HTTP responses here come from the in-memory Telegram transport.
+        self.enterContext(patch.dict("sys.modules", {"requests": SimpleNamespace(RequestException=OSError)}))
+
+    @staticmethod
+    def response(status, payload):
+        return Mock(ok=status == 200, status_code=status, json=Mock(return_value=payload))
+
+    def test_delivery_classifier_rejects_only_private_terminal_send_errors(self):
+        session=Mock()
+        client=Telegram(session,"fixture-token")
+        blocked="Forbidden: bot was blocked by the user"
+        for method,chat,status,description,terminal in (
+            ("sendVoice",22,403,blocked,True),
+            ("sendDocument",22,403,"Forbidden: user is deactivated",True),
+            ("sendMessage",22,403,blocked,True),
+            ("sendMessage",22,403,"Forbidden: unrelated",False),
+            ("sendMessage",-22,403,blocked,False),
+            ("sendMessage",22,401,blocked,False),
+            ("sendMessage",22,429,blocked,False),
+            ("getFile",22,403,blocked,False),
+            ("getUpdates",22,403,blocked,False),
+        ):
+            with self.subTest(method=method,chat=chat,status=status,description=description):
+                session.request.return_value=self.response(status,{"ok":False,"description":description,"error_code":status})
+                with self.assertRaises(ProviderError) as captured:
+                    client.api(method,{"chat_id":chat})
+                self.assertEqual(captured.exception.status,status)
+                self.assertEqual(isinstance(captured.exception,RecipientUnavailable),terminal)
+                self.assertNotIn(description,str(captured.exception))
+
+    def test_poll_retries_temporary_voice_delivery_then_advances_past_blocked_recipient(self):
+        session=Mock()
+        telegram=Telegram(session,"fixture-token")
+        blocked,next_user=778811,778822
+        updates=[{"update_id":i,"message":{"chat":{"id":user,"type":"private"},"from":{"id":user},
+                                            "text":"/voice_check"}} for i,user in [(21,blocked),(22,next_user)]]
+        offsets=[]
+        recipients=[]
+        def transport(method,url,**options):
+            if url.endswith("/getUpdates"):
+                offsets.append(options["json"]["offset"])
+                if len(offsets) > 2:
+                    raise KeyboardInterrupt()
+                return self.response(200,{"ok":True,"result":updates})
+            user=options["data"]["chat_id"]
+            self.assertTrue(url.endswith("/sendVoice"))
+            recipients.append(user)
+            if user==blocked:
+                code=429 if len(recipients)==1 else 403
+                return self.response(code,{"ok":False,"error_code":code,"description":"Forbidden: bot was blocked by the user"})
+            return self.response(200,{"ok":True,"result":{"voice":{"file_unique_id":"sample"},"message_id":42}})
+        session.request.side_effect=transport
+        with tempfile.TemporaryDirectory() as directory:
+            bot=Bot(telegram,None,None,Path(directory),1)
+            self.addCleanup(bot.db.close)
+            bot.voice_check=VoiceCheck(telegram)
+            with patch("bot.main.time.sleep",side_effect=[None,AssertionError("unexpected retry")]) as sleep,self.assertLogs(level="WARNING") as logs,self.assertRaises(KeyboardInterrupt):
+                bot.run()
+            sleep.assert_called_once_with(20)
+            self.assertEqual(offsets,[0,0,23])
+            self.assertEqual(recipients,[blocked,blocked,next_user])
+            self.assertEqual(bot.get("offset"),23)
+            self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM receipts").fetchone(),(0,))
+            self.assertEqual(list(bot.voice_check.challenges),[next_user])
+            self.assertFalse(any(str(blocked) in line or "fixture-token" in line or "Forbidden:" in line for line in logs.output))

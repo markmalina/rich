@@ -104,7 +104,7 @@ class IntakeTest(unittest.TestCase):
         self.model.transcribe.return_value = "Учебная запись. Сделал десять отжиманий."
         self.model.plan.return_value = plan("record", events=[event("activity", action="Отжимание", quantity=10)])
         source = self.submit(1, document={"file_name": "ExErCiSe.OGA", "file_id": "fixture", "mime_type": "application/octet-stream"})
-        self.model.transcribe.assert_called_once_with("tg-7-1.ogg", data, "audio/ogg")
+        self.model.transcribe.assert_called_once_with("voice.ogg", data, "audio/ogg")
         self.assertEqual((self.root / "tg-7-1.ogg").read_bytes(), data)
         self.assertEqual(self.google.events[0][3:6], ["Отжимание", 10, "повт."])
         self.submit(2, text="/original", reply_to_message=source)
