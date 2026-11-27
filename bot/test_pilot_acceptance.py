@@ -13,7 +13,7 @@ from urllib.parse import unquote
 from .group_telegram import GroupTelegram, configured_groups
 from .ledger import MOSCOW
 from .main import Bot
-from .onboarding import DRIVE_URL, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
+from .onboarding import DRIVE_URL, REGISTRY, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
 from .providers import ProviderError, SHEETS_URL
 from .test_tracker import FakeGoogle, event
 
@@ -156,6 +156,86 @@ def membership(update, user, status):
 
 
 class PilotAcceptanceTest(unittest.TestCase):
+    @staticmethod
+    def participant_status(directory, google, telegram, update_id):
+        bot = Bot(telegram, None, None, Path(directory), OWNER, PilotProvisioner(google.session, "registry"))
+        with closing(bot.db):
+            update = message(update_id, MEMBER, "/status")
+            bot.receive([update])
+            bot.process_update(update)
+            return bot.registered_sheet(MEMBER)
+
+    def test_pending_registry_append_survives_restart_without_adding_a_second_pair(self):
+        google, telegram = PilotGoogle(), PilotTelegram()
+        registry_writes = []
+        registry_pending = []
+
+        def delay_registry(session, provider, method, url, **kwargs):
+            if method == "POST" and unquote(url).endswith("/registry/values/" + REGISTRY + ":append"):
+                registry_writes.append(kwargs["json"]["values"])
+                if len(registry_writes) == 1:
+                    registry_pending.append((session, provider, method, url, kwargs))
+                    raise ProviderError("Google Sheets", "connection")
+            return google.request(session, provider, method, url, **kwargs)
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch("bot.onboarding.request", side_effect=google.request),
+              patch("bot.providers.request", side_effect=delay_registry)):
+            self.assertIsNone(self.participant_status(directory, google, telegram, 1))
+            self.assertIsNone(self.participant_status(directory, google, telegram, 2))
+            self.assertEqual(google.books["registry"][0].rows, [REGISTRY_HEADERS])
+            session, provider, method, url, kwargs = registry_pending.pop()
+            google.request(session, provider, method, url, **kwargs)
+            self.assertEqual(self.participant_status(directory, google, telegram, 3).spreadsheet_id, "test-file-2")
+            self.assertEqual(self.participant_status(directory, google, telegram, 4).spreadsheet_id, "test-file-2")
+            self.assertEqual(registry_writes, [[["test-file-2", "test-file-1", 0]]])
+            self.assertEqual(google.books["registry"][0].rows, [REGISTRY_HEADERS, ["test-file-2", "test-file-1", 0]])
+            self.assertEqual(len(google.created), 2)
+
+    def test_reopens_after_each_provisioning_write_and_preserves_existing_cells(self):
+        google, telegram = PilotGoogle(), PilotTelegram()
+        writes = []
+
+        def lose_write_reply(session, provider, method, url, **kwargs):
+            result = google.request(session, provider, method, url, **kwargs)
+            if method != "GET":
+                writes.append((method, unquote(url)))
+                raise ProviderError(provider, "connection")
+            return result
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch("bot.onboarding.request", side_effect=lose_write_reply),
+              patch("bot.providers.request", side_effect=lose_write_reply)):
+            for step in range(1, 5):
+                with self.subTest(step=step):
+                    self.assertIsNone(self.participant_status(directory, google, telegram, step))
+                    self.assertEqual(len(writes), step)
+
+            base = {tab.properties["title"]: tab for tab in google.books["test-file-2"].values()}
+            formulas = {title: base[title].rows[1][column]
+                        for title, column in (("События", 15), ("Действия", 6), ("Экспорт Faces", 0))}
+            self.assertTrue(all(formula.startswith("=") for formula in formulas.values()))
+            base["Входящие"].write(1, 0, [["fixture-original"]])
+            base["События"].write(1, 8, [["fixture-original", "", "", "fixture-event"]])
+            base["Правило"].write(6, 0, [["Личное правило"]])
+
+            for step in (5, 6):
+                with self.subTest(step=step):
+                    self.assertIsNone(self.participant_status(directory, google, telegram, step))
+                    self.assertEqual(len(writes), step)
+            for step in (7, 8):
+                sheet = self.participant_status(directory, google, telegram, step)
+                self.assertEqual(sheet.spreadsheet_id, "test-file-2")
+                self.assertEqual(sheet.read("'Входящие'!A2"), [["fixture-original"]])
+                self.assertEqual(sheet.read("'События'!I2:L2"), [["fixture-original", "", "", "fixture-event"]])
+                self.assertEqual(sheet.read("'Правило'!A7"), [["Личное правило"]])
+                for title, cell in (("События", "P2"), ("Действия", "G2"), ("Экспорт Faces", "A2")):
+                    self.assertEqual(sheet.read(f"'{title}'!{cell}"), [[formulas[title]]])
+            self.assertEqual(len(writes), 6)
+            self.assertEqual(len(google.created), 2)
+            self.assertEqual(google.books["registry"][0].rows,
+                             [REGISTRY_HEADERS, ["test-file-2", "test-file-1", 0]])
+
     def test_two_participants_and_existing_owner_survive_restart_and_share_only_confirmed_report(self):
         google, telegram, existing, face = PilotGoogle(), PilotTelegram(), FakeGoogle(), Mock()
         model = Mock()
