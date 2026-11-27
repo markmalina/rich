@@ -71,6 +71,16 @@ class SalesTest(unittest.TestCase):
         self.assertIn("отменён",self.call("/pilot_cancel 2"))
         self.assertIn("Отменённый",self.call("/pilot_paid 2 350 | void"))
 
+    def test_school_access_operation_requires_school_enrolment(self):
+        self.call("/pilot_goods 8 demo 1 80 350")
+        self.call("/pilot_paid 1 350 | goods-demo")
+        self.call("/pilot_refund_request 1", 8)
+        self.call("/pilot_refund 1 100 | goods-return")
+        self.assertIn("Учебный доступ по этому заказу отсутствует", self.call("/pilot_suspend 1 on"))
+        self.assertIn("350 ₽", self.call("/pilot_order 1"))
+        self.assertIn("Возвращено: 100 ₽", self.call("/pilot_order 1"))
+        self.assertIn("1 × 80 г", self.call("/pilot_delivery 1"))
+
     def test_qr_attribution_separate_product_and_partner_privacy(self):
         self.pack()
         self.call("/pilot_qr demo trainer 5 | counts")

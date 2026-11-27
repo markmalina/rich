@@ -147,10 +147,15 @@ class DemoCheckout:
                 SELECT 1 FROM pilot_orders WHERE buyer=? AND kind=? AND demo=1 AND state<>'cancelled'
             )
         """, (user, kind, price, source, now.isoformat(), user, kind))
-        return self.db.execute("""
+        (order_id,) = self.db.execute("""
             SELECT id FROM pilot_orders WHERE buyer=? AND kind=? AND demo=1 AND state<>'cancelled'
             ORDER BY (state='awaiting') DESC,id DESC LIMIT 1
-        """, (user, kind)).fetchone()[0]
+        """, (user, kind)).fetchone()
+        if source:
+            self.db.execute("""
+                UPDATE pilot_orders SET source=? WHERE id=? AND state='awaiting' AND source IS NULL
+            """, (source, order_id))
+        return order_id
 
     def get_order(self, order_id, user):
         order = self.pilot.order(order_id, user)

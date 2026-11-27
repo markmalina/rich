@@ -89,6 +89,24 @@ class DemoCheckoutTest(unittest.TestCase):
         self.message(8, "/tracking")
         self.assertIn("завершён", self.screen()["text"])
 
+    def test_first_known_qr_is_kept_on_an_unpaid_order_and_purchase_freezes_source(self):
+        self.message(8, "/pay")
+        self.click_label(8, "Трекинг · 4 200 ₽")
+        self.assertEqual(self.db.execute("SELECT source FROM pilot_orders").fetchall(), [(None,)])
+        self.message(8, "/start tracking_GR020010")
+        self.message(8, "/start tracking_GR020011")
+        self.assertEqual(self.db.execute("SELECT source FROM pilot_orders").fetchall(), [("GR020010",)])
+        self.click_label(8, "Оплатить")
+        self.click_label(8, "Я оплатил")
+
+        self.message(9, "/pay")
+        self.click_label(9, "Трекинг · 4 200 ₽")
+        self.click_label(9, "Оплатить")
+        self.click_label(9, "Я оплатил")
+        self.message(9, "/start tracking_GR020011")
+        self.assertEqual(self.db.execute("SELECT buyer,source,state FROM pilot_orders ORDER BY id").fetchall(),
+                         [(8, "GR020010", "paid"), (9, None, "paid")])
+
     def test_school_and_separate_goods_advance_with_own_buttons(self):
         self.message(8, "/pay")
         self.click_label(8, "Школа и продвижение · 9 900 ₽")

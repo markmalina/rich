@@ -126,7 +126,12 @@ class Sales(Pilot):
             count=self.db.execute("SELECT COUNT(*) FROM pilot_refunds WHERE order_id=?",(i,)).fetchone()[0]
             if not count or words not in (["on"],["off"]):
                 raise Clarification("После сверенного возврата укажи /pilot_suspend ID on или off.")
-            self.db.execute("UPDATE school_enrolments SET suspended=? WHERE order_id=?", (int(words[0]=="on"),i))
+            if order[1] != "package":
+                raise Clarification("Учебный доступ по этому заказу отсутствует.")
+            updated = self.db.execute("UPDATE school_enrolments SET suspended=? WHERE order_id=?",
+                                      (int(words[0] == "on"), i))
+            if not updated.rowcount:
+                raise Clarification("Учебный доступ по этому заказу отсутствует.")
             return "Решение о доступе сохранено отдельно от возврата."
         if command == "/pilot_assign" and len(words)==1 and (valid_id(words[0]) or words[0]=="off"):
             self.db.execute("DELETE FROM pilot_couriers WHERE order_id=?",(i,))
