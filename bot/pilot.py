@@ -41,7 +41,7 @@ def kopecks(amount):
 
 
 class Pilot:
-    def __init__(self, db, telegram, owner, *, price=PACKAGE_PRICE, live_seller=None):
+    def __init__(self, db, telegram, owner, *, price=PACKAGE_PRICE, live_seller=None, access_scope=None):
         self.db = db
         self.telegram = telegram
         self.owner = owner
@@ -65,7 +65,7 @@ class Pilot:
                 update_id INTEGER PRIMARY KEY, user INTEGER NOT NULL, result TEXT NOT NULL
             );
         """)
-        self.school=School(db)
+        self.school=School(db, access_scope=access_scope)
 
     def handle(self, update_id, user, message, now):
         command, _, argument = message.get("text","").strip().partition(" ")
@@ -96,7 +96,7 @@ class Pilot:
             rows=self.db.execute("SELECT id,total,state,demo FROM pilot_orders WHERE buyer=? AND kind='package' ORDER BY id DESC LIMIT 10",
                                  (user,))
             labels=[f"#{i} · {rub(total)} · {self.label(state)}{' · учебный' if demo else ''}" for i,total,state,demo in rows]
-            return "\n".join([*labels,SCHOOL_HELP,"Черновик остаётся у ученика. /school_share ID день | текст — передать наставнику."])
+            return "\n".join([*labels,SCHOOL_HELP,"Черновик остаётся у ученика. /school_share ID день | текст — проверить получателя перед отправкой."])
         if command == "/pilot":
             if user != self.owner:
                 raise Clarification("Команда оператора. Доступные команды ученика: /school.")
@@ -177,11 +177,16 @@ class Pilot:
             self.require_operator(user)
             if len(words)!=1 or not valid_id(words[0]) or int(words[0])==order[0]:
                 raise Clarification("Формат: /pilot_mentor ID_заказа ID_наставника. Укажи отдельный профиль.")
-            updated=self.db.execute("UPDATE school_enrolments SET mentor=? WHERE order_id=?", (int(words[0]),order_id))
+            mentor = int(words[0])
+            if self.school.access_scope(mentor) is None:
+                raise Clarification("Для назначения нужен допущенный наставник.")
+            updated = self.db.execute("""
+                UPDATE school_enrolments SET mentor_revision=mentor_revision+(mentor<>?), mentor=? WHERE order_id=?
+            """, (mentor, mentor, order_id))
             if not updated.rowcount:
                 raise Clarification("Место в потоке пока не создано.")
             self.db.execute("UPDATE school_included_coaching SET tracker=? WHERE order_id=?",
-                            (int(words[0]), order_id))
+                            (mentor, order_id))
             return "Назначение наставника обновлено. Предыдущий наставник теряет доступ."
         return self.extra(command,order_id,order,words,fields,user,now,update_id)
 

@@ -27,6 +27,66 @@ class SchoolPilotTest(unittest.TestCase):
         self.assertTrue(self.pilot.handle(self.update,user,{"text":text},self.now+dt.timedelta(days=advance)))
         return self.telegram.message.call_args.args[1]
 
+    def confirmation(self, user, command, advance=0):
+        reply = self.cmd(user, command, advance)
+        self.assertIn("/school_confirm_share ", reply)
+        return reply[reply.index("/school_confirm_share "):].rstrip(".")
+
+    def test_preview_requires_learner_and_current_assignment_and_consent(self):
+        scopes = {7: "operator", 8: "learner", 10: "first-acceptance"}
+        self.pilot.school.access_scope = scopes.get
+        self.cmd(7, "/pilot_offer 8 demo")
+        self.cmd(7, "/pilot_paid 1 9900 | fixture")
+        before = self.confirmation(8, "/school_share 1 1 | Первый текст")
+        self.assertIn("из своего", self.cmd(7, before))
+        self.assertIn("не найдено", self.cmd(9, before))
+        self.assertIn("допущенный", self.cmd(7, "/pilot_mentor 1 11"))
+        self.cmd(7, "/pilot_mentor 1 10")
+        self.assertIn("устарело", self.cmd(8, before))
+        self.cmd(7, "/pilot_mentor 1 7")
+        self.assertIn("устарело", self.cmd(8, before))
+        self.cmd(7, "/pilot_mentor 1 10")
+
+        again = self.confirmation(8, "/school_share 1 1 | Второй текст")
+        scopes.pop(10)
+        self.assertIn("устарело", self.cmd(8, again))
+        scopes[10] = "second-acceptance"
+        self.assertIn("устарело", self.cmd(8, again))
+        expiring = self.confirmation(8, "/school_share 1 1 | Третий текст")
+        self.now += dt.timedelta(minutes=16)
+        self.assertIn("устарело", self.cmd(8, expiring))
+        final = self.confirmation(8, "/school_share 1 1 | Последний текст")
+        self.assertIn("передана", self.cmd(8, final))
+        self.assertIn("передана", self.cmd(8, final, replay=True))
+        self.assertIn("уже использовано", self.cmd(8, final))
+        history = self.cmd(10, "/school_history 1")
+        self.assertIn("Последний текст", history)
+        self.assertNotIn("Первый текст", history)
+        self.assertEqual(self.db.execute("SELECT shared_with FROM school_work WHERE shared=1").fetchall(), [(10,)])
+
+    def test_legacy_rows_survive_migration_without_assuming_recipient(self):
+        self.cmd(7, "/pilot_offer 8 demo")
+        self.cmd(7, "/pilot_paid 1 9900 | legacy-fixture")
+        for table, column in (("school_work", "shared_with"), ("school_work", "mentor_revision"),
+                              ("school_comments", "mentor_revision"), ("school_enrolments", "mentor_revision")):
+            self.db.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        with self.db:
+            self.db.execute("INSERT INTO school_work VALUES (1,1,40,8,'Исторический текст',1,?)",
+                            (self.now.isoformat(),))
+            self.db.execute("INSERT INTO school_comments VALUES (1,1,41,7,'Исторический отзыв',?)",
+                            (self.now.isoformat(),))
+        self.pilot = Pilot(self.db, self.telegram, 7)
+        self.pilot = Pilot(self.db, self.telegram, 7)
+        old = self.cmd(8, "/school_history 1")
+        self.assertIn("Исторический текст", old)
+        self.assertIn("Исторический отзыв", old)
+        self.assertNotIn("Историческ", self.cmd(7, "/school_history 1"))
+        new = self.confirmation(8, "/school_share 1 1 | Исторический текст")
+        self.assertIn("передана", self.cmd(8, new))
+        history = self.cmd(7, "/school_history 1")
+        self.assertIn("Исторический текст", history)
+        self.assertNotIn("Исторический отзыв", history)
+
     def test_one_order_opens_one_seat_and_one_kit_and_preserves_quote(self):
         self.assertIn("не открыт",self.cmd(7,"/pilot_offer 8 live"))
         self.assertIn("9 900",self.cmd(7,"/pilot_offer 8 demo | trener-ref"))
@@ -61,7 +121,9 @@ class SchoolPilotTest(unittest.TestCase):
             self.cmd(8,c,20,replay=True)
         self.assertNotIn("Непубличный черновик",self.cmd(7,"/school_history 1",20))
         self.assertIn("не передал",self.cmd(7,"/school_feedback 1 14 | к практике",20))
-        self.cmd(8,"/school_share 1 14 | Учебная работа для наставника",20)
+        confirmation = self.confirmation(8, "/school_share 1 14 | Учебная работа для наставника", 20)
+        self.assertNotIn("Учебная работа", self.cmd(7, "/school_history 1", 20))
+        self.assertIn("передана", self.cmd(8, confirmation, 20))
         self.cmd(7,"/school_feedback 1 14 | Договорённость понятна",20)
         self.assertIn("Договорённость понятна",self.cmd(8,"/school_history 1",20))
         self.assertIn("завершение",self.cmd(7,"/school_finish 1",20).lower())
@@ -69,7 +131,9 @@ class SchoolPilotTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_work").fetchone(),(4,))
         self.cmd(7,"/pilot_mentor 1 10",20)
         self.assertIn("не найдено",self.cmd(7,"/school_history 1",20))
-        self.assertIn("Учебная работа",self.cmd(10,"/school_history 1",20))
+        self.assertNotIn("Учебная работа", self.cmd(10, "/school_history 1", 20))
+        self.assertNotIn("Договорённость понятна", self.cmd(10, "/school_history 1", 20))
+        self.assertIn("Учебная работа", self.cmd(8, "/school_history 1", 20))
         with patch.dict(PROGRAMS, {"v2":PROGRAMS[VERSION]}), patch("bot.school.VERSION","v2"):
             self.cmd(7,"/pilot_offer 8 demo",20)
             self.cmd(7,"/pilot_paid 2 9900 | demo-b",20)

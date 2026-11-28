@@ -245,6 +245,14 @@ class Bot:
             return None
         return self.terms_version or "open"
 
+    def school_access_scope(self, user):
+        version = self.private_access_version(user)
+        if version is None or self.terms_version is None or user == self.owner:
+            return version
+        receipt = self.db.execute("SELECT received,update_id FROM private_consents WHERE user=?",
+                                  (user,)).fetchone()
+        return json.dumps((version, *receipt))
+
     def show_terms(self, user):
         self.telegram.message(user, f"{self.terms}\n\nПринять: /pilot_consent {self.terms_version}\n"
                                     "Отозвать: /pilot_withdraw")
@@ -812,7 +820,8 @@ def main():
             seller = (os.environ.get("TRACKER_PILOT_SELLER", "").strip()
                       if not demo_checkout and os.environ.get("TRACKER_COMMERCIAL_OPEN") == "1" else None)
             pilot_class = Sales if os.environ.get("TRACKER_FULFILLMENT") == "1" else Pilot
-            bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller)
+            bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller,
+                                           access_scope=bot.school_access_scope)
             if demo_checkout:
                 bot.voice_check = VoiceCheck(telegram)
                 bot.demo_checkout = DemoCheckout(

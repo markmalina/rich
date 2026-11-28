@@ -13,6 +13,7 @@ from urllib.parse import unquote
 from .group_telegram import GroupTelegram, configured_groups
 from .ledger import MOSCOW
 from .main import Bot
+from .pilot import Pilot
 from .onboarding import DRIVE_URL, REGISTRY, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
 from .providers import ProviderError, SHEETS_URL
 from .test_tracker import FakeGoogle, event
@@ -236,6 +237,42 @@ class PilotAcceptanceTest(unittest.TestCase):
                 self.assertFalse(bot.has_private_access(MEMBER))
                 dispatch(bot, message(5, MEMBER, f"/pilot_consent {bot.terms_version}"))
                 self.assertTrue(bot.has_private_access(MEMBER))
+
+    def test_recipient_reaccepting_terms_needs_fresh_school_preview(self):
+        telegram = PilotTelegram()
+        with tempfile.TemporaryDirectory() as directory:
+            bot = Bot(telegram, None, None, Path(directory), OWNER, admitted={TRACKER, MEMBER},
+                      terms="Учебное уведомление")
+            with closing(bot.db):
+                bot.pilot_orders = Pilot(bot.db, telegram, OWNER, access_scope=bot.school_access_scope)
+
+                def send(update, user, text):
+                    item = message(update, user, text)
+                    bot.receive([item])
+                    bot.process_update(item)
+                    return telegram.calls[-1][1]["text"]
+
+                token = f"/pilot_consent {bot.terms_version}"
+                send(100, MEMBER, token)
+                send(101, TRACKER, token)
+                send(102, OWNER, f"/pilot_offer {MEMBER} demo")
+                send(103, OWNER, "/pilot_paid 1 9900 | fixture")
+                send(104, OWNER, f"/pilot_mentor 1 {TRACKER}")
+                preview = send(105, MEMBER, "/school_share 1 1 | Учебная работа")
+                self.assertIn(f"Telegram ID {TRACKER}", preview)
+                confirm = preview[preview.index("/school_confirm_share "):].rstrip(".")
+
+                send(106, TRACKER, "/pilot_withdraw")
+                self.assertIn("устарело", send(107, MEMBER, confirm))
+                send(108, TRACKER, token)
+                self.assertIn("устарело", send(109, MEMBER, confirm))
+                self.assertNotIn("Учебная работа", send(110, TRACKER, "/school_history 1"))
+                current = send(111, MEMBER, "/school_share 1 1 | Учебная работа")
+                confirm = current[current.index("/school_confirm_share "):].rstrip(".")
+                self.assertIn("передана", send(112, MEMBER, confirm))
+                self.assertIn("Учебная работа", send(113, TRACKER, "/school_history 1"))
+                send(114, MEMBER, "/pilot_withdraw")
+                self.assertIn("приостановлен", send(115, TRACKER, "/school_history 1"))
 
     def test_late_inbox_append_survives_restart_without_blocking_other_profiles(self):
         google, telegram, owner_sheet = PilotGoogle(), PilotTelegram(), FakeGoogle()

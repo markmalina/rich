@@ -224,6 +224,9 @@ class DemoCheckoutTest(unittest.TestCase):
         confirm = self.click_label(8, "Я оплатил")
         self.message(8, "/pilot_refund_request 1")
         self.message(7, "/pilot_refund 1 100 | partial")
+        self.message(8, "/school_share 1 1 | Тестовая работа")
+        preview = self.tg.message.call_args.args[1]
+        share = preview[preview.index("/school_confirm_share "):].rstrip(".")
         self.message(7, "/pilot_suspend 1 on")
 
         self.message(8, "/pay")
@@ -240,6 +243,9 @@ class DemoCheckoutTest(unittest.TestCase):
         self.message(7, "/pilot_suspend 1 off")
         self.callback(8, confirm)
         self.assertIn("/school_day 1", self.screen()["text"])
+        self.message(8, share)
+        self.assertIn("устарело", self.tg.message.call_args.args[1])
+        self.assertEqual(self.db.execute("SELECT shared FROM school_work").fetchall(), [(0,)])
         self.assertEqual(self.db.execute("SELECT amount FROM pilot_receipts").fetchall(), [(990000,)])
         self.assertEqual(self.db.execute("SELECT amount FROM pilot_refunds").fetchall(), [(10000,)])
         self.assertEqual(self.db.execute("SELECT units,grams FROM pilot_kits").fetchall(), [(21, 80)])

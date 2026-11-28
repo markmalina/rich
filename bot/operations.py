@@ -157,6 +157,8 @@ def apply_privacy(db, ledger):
         db.execute(f"UPDATE school_enrolments SET suspended=1 WHERE order_id IN ({orders})",(user,day))
         db.execute(f"DELETE FROM school_work WHERE order_id IN ({orders})",(user,day))
         db.execute(f"DELETE FROM school_comments WHERE order_id IN ({orders})",(user,day))
+        if table_exists(db, "school_share_previews"):
+            db.execute(f"DELETE FROM school_share_previews WHERE order_id IN ({orders})", (user, day))
         if table_exists(db,"school_activity"):
             db.execute(f"DELETE FROM school_activity WHERE order_id IN ({orders})",(user,day))
         if table_exists(db,"privacy_requests"):
