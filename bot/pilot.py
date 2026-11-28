@@ -102,6 +102,7 @@ class Pilot:
                 raise Clarification("Команда оператора. Доступные команды ученика: /school.")
             return ("Оператор школы. /pilot_offer ID demo создаёт учебный заказ. "
                     "/pilot_offer ID live — рабочий заказ, когда включён продавец. "
+                    "/pilot_cohort_create ID ГГГГ-ММ-ДД demo|live — общий старт школы. "
                     "/pilot_paid ID сумма [дата старта] | основание. /pilot_order ID — сверка. "
                     "/pilot_cohorts demo или live — возвращение к учёбе на 7-й и 21-й день. "
                     "/school_finish ID, /school_feedback ID день | комментарий.")
@@ -114,15 +115,32 @@ class Pilot:
                 raise Clarification("Дата отчёта не может быть позже сегодняшней.")
             demo=words[0]=="demo"
             lines=[f"{'Учебные' if demo else 'Рабочие'} потоки на {through:%d.%m.%Y} МСК."]
+            for cohort,start,version,day,target,state,eligible,active,late,late_active,withdrawn in self.school.named_cohorts(demo,through):
+                lines.append(f"{cohort} · старт {start} · {version} · день {day} ({target:%d.%m}): "
+                             f"{state}, стартовый состав {active} из {eligible}; "
+                             f"поздние {late_active} из {late}; вышли {withdrawn}.")
             lines.extend(f"Старт {start} · {version} · день {day}: {active} из {eligible}."
                          for start,version,day,eligible,active in self.school.cohorts(demo,through))
             if len(lines)==1:
                 lines.append("Потоков, дошедших до контрольного дня, пока нет.")
             return "\n".join(lines)
+        if command == "/pilot_cohort_create":
+            self.require_operator(user)
+            if fields or len(words)!=3 or words[2] not in {"demo", "live"}:
+                raise Clarification("Формат: /pilot_cohort_create ID ГГГГ-ММ-ДД demo или live.")
+            starts = day_arg(words[1])
+            created = self.school.create_cohort(words[0], starts, words[2] == "demo", now)
+            return ("Поток создан." if created else "Поток уже существует с этими параметрами.")
+        if command == "/pilot_cohort_member":
+            self.require_operator(user)
+            if fields or len(words)!=3 or not valid_id(words[1]):
+                raise Clarification("Формат: /pilot_cohort_member ID_потока ID_участника active или withdrawn.")
+            self.school.member_state(words[0], int(words[1]), words[2])
+            return "Состояние участника потока обновлено."
         if command == "/pilot_offer":
             self.require_operator(user)
-            if len(words)!=2 or not valid_id(words[0]) or words[1] not in {"demo","live"}:
-                raise Clarification("Формат: /pilot_offer ID demo или /pilot_offer ID live.")
+            if len(words) not in {2,3} or not valid_id(words[0]) or words[1] not in {"demo","live"}:
+                raise Clarification("Формат: /pilot_offer ID demo|live [ID_потока].")
             buyer=int(words[0])
             if buyer==self.owner:
                 raise Clarification("Назначь отдельного ученика.")
@@ -133,6 +151,8 @@ class Pilot:
             if fields and not src:
                 raise Clarification("Код источника должен содержать латинские буквы, цифры, дефис или подчёркивание.")
             order=self.new_order(buyer,"package",self.price,demo,src,now)
+            if len(words)==3:
+                self.school.assign_order(order, words[2], "consented-participant")
             return f"{'Учебный заказ' if demo else 'Заказ'} #{order}: школа и продвижение, {rub(self.price)}. Ждёт сверки оплаты."
         if not words:
             raise Clarification("Укажи ID заказа. Список: /school.")
@@ -160,6 +180,8 @@ class Pilot:
             updated=self.db.execute("UPDATE school_enrolments SET mentor=? WHERE order_id=?", (int(words[0]),order_id))
             if not updated.rowcount:
                 raise Clarification("Место в потоке пока не создано.")
+            self.db.execute("UPDATE school_included_coaching SET tracker=? WHERE order_id=?",
+                            (int(words[0]), order_id))
             return "Назначение наставника обновлено. Предыдущий наставник теряет доступ."
         return self.extra(command,order_id,order,words,fields,user,now,update_id)
 
@@ -207,7 +229,7 @@ class Pilot:
                         (i,seller,reference,total,operator,now.isoformat()))
         self.db.execute("UPDATE pilot_orders SET state='paid',updated=? WHERE id=?",(now.isoformat(),i))
         if kind=="package":
-            self.school.enrol(i,buyer,operator if mentor is None else mentor,start)
+            self.school.enrol(i,buyer,operator if mentor is None else mentor,start,now)
         if kind in {"package", "tracking"}:
             self.db.execute("INSERT INTO pilot_kits VALUES (?,?,?,?)",(i,PACK,PORTION,now.isoformat()))
         if kind=="package":

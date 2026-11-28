@@ -173,6 +173,50 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertIn("Гранола: заявок 1, оплат 1", self.bot.pilot_orders.metrics(True, None))
         self.assertNotIn("оплат 1", self.bot.pilot_orders.metrics(False, None))
 
+    def test_first_seven_school_days_do_not_offer_a_separate_coaching_payment(self):
+        self.message(7, "/pilot_cohort_create first-2026 2026-11-27 demo")
+        self.bot.demo_checkout.school_cohort = "first-2026"
+        self.bot.demo_checkout.consent_version = "terms-v1"
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.click_label(8, "Оплатить")
+        self.click_label(8, "Я оплатил")
+
+        self.message(7, "/coach_invite demo")
+        code = self.tg.message.call_args.args[1].split()[-1]
+        self.message(8, f"/coach_join {code}")
+        self.message(8, "/coach_plan 1 | движение | отчёт | пн,вт,ср,чт,пт,сб,вс | 5 мин | 20:00–21:00")
+        self.message(8, "/coach_share_plan 1")
+        self.message(7, "/coach_accept 1")
+        self.message(8, "/pay")
+        self.assertFalse(any("Оплатить день" in row[0]["text"]
+                             for row in self.screen()["reply_markup"]["inline_keyboard"]))
+        self.callback(8, "dp:coachpay:1:20261127")
+        self.assertIn("нет", self.tg.api.call_args.args[1]["text"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (0,))
+
+        self.now += dt.timedelta(days=7)
+        self.message(8, "/pay")
+        self.assertTrue(any("Оплатить день" in row[0]["text"]
+                            for row in self.screen()["reply_markup"]["inline_keyboard"]))
+        self.assertEqual(self.db.execute("""
+            SELECT starts,ends,consent_version FROM school_included_coaching s
+            JOIN school_order_cohorts c ON c.order_id=s.order_id
+        """).fetchone(), ("2026-11-27", "2026-12-03", "terms-v1"))
+        with self.db:
+            self.db.execute("UPDATE school_enrolments SET suspended=1 WHERE order_id=1")
+        self.now -= dt.timedelta(days=7)
+        self.message(8, "/pay")
+        self.assertTrue(any("Оплатить день" in row[0]["text"]
+                            for row in self.screen()["reply_markup"]["inline_keyboard"]))
+
+    def test_missing_configured_cohort_does_not_leave_an_orphan_order(self):
+        self.bot.demo_checkout.school_cohort = "missing-cohort"
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.assertIn("не найден", self.tg.api.call_args.args[1]["text"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_orders").fetchone(), (0,))
+
     def test_paid_school_screen_tracks_access_after_refund(self):
         self.message(8, "/pay")
         self.click_label(8, "Школа и продвижение · 9 900 ₽")
@@ -270,7 +314,10 @@ class DemoCheckoutTest(unittest.TestCase):
         self.message(9, "/coach_report 1 | да")
         self.message(8, "/school_status 2")
         self.assertIn("Курс завершён", self.tg.message.call_args.args[1])
-        self.assertIn("Реальных клиентов: 0. Подтверждено оплаченных дней: 0", self.tg.message.call_args.args[1])
+        status = self.tg.message.call_args.args[1]
+        self.assertIn("Подтверждённая практика: 0", status)
+        self.assertIn("Фактически платящих клиентов: 0", status)
+        self.assertIn("Оплаченных дней: 0", status)
 
         self.message(7, "/pilot_stock 2 reserve 21 | kit-reserve")
         for units in (14, 7):

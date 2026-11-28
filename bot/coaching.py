@@ -91,6 +91,19 @@ class Coaching:
     def admits(self, user):
         return self._admitted is None or self._admitted(user)
 
+    def included_in_school(self, link, day):
+        if not self.db.execute("""
+                SELECT 1 FROM sqlite_master WHERE type='table' AND name='school_included_coaching'
+        """).fetchone():
+            return False
+        return self.db.execute("""
+            SELECT 1 FROM school_included_coaching s
+            JOIN school_enrolments e ON e.order_id=s.order_id AND e.suspended=0
+            JOIN coach_links l ON l.id=?
+            WHERE s.learner=l.client AND s.tracker=l.tracker AND ? BETWEEN s.starts AND s.ends
+            LIMIT 1
+        """, (link, str(day))).fetchone() is not None
+
     def handle(self, update_id, user, message, received):
         raw = message.get("text", "").strip()
         command, _, args = raw.partition(" ")
@@ -235,6 +248,8 @@ class Coaching:
         if command == "/coach_paid" and not is_client:
             if self.demo_only:
                 raise Clarification("Сейчас доступна только учебная оплата клиентом через /pay.")
+            if self.included_in_school(link, day):
+                raise Clarification("Этот день сопровождения входит в пакет школы 9 900 ₽.")
             self.require_active_day(link, day, today, weekdays)
             basis, = limited_fields(fields, 1)
             old = self.db.execute("SELECT basis FROM coach_payments WHERE link=? AND day=?", (link, str(day))).fetchone()

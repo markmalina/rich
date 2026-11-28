@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 from .coaching import Coaching
 from .ledger import MOSCOW
 from .pilot import Pilot
-from .school import PROGRAMS, VERSION
+from .school import PROGRAMS, VERSION, School
 
 
 class SchoolPilotTest(unittest.TestCase):
@@ -88,11 +88,39 @@ class SchoolPilotTest(unittest.TestCase):
                 if demo:
                     self.db.execute("INSERT INTO coach_payments VALUES (?,?,?,?,?)",
                                     (link,"2026-11-26","simulation",8,self.now.isoformat()))
-        self.assertIn("Реальных клиентов: 1. Подтверждено оплаченных дней: 0",self.cmd(8,"/school_status 1"))
+        status = self.cmd(8,"/school_status 1")
+        self.assertIn("Подтверждённая практика: 1", status)
+        self.assertIn("Фактически платящих клиентов: 0", status)
+        self.assertIn("Первый заработок ещё не подтверждён", status)
         with self.db:
+            self.db.execute("""
+                INSERT INTO school_enrolments(order_id,learner,mentor,starts,version)
+                VALUES (2,11,8,'2026-11-26',?)
+            """, (VERSION,))
+            self.db.execute("INSERT INTO school_included_coaching VALUES (2,11,8,'2026-11-26','2026-12-02')")
             self.db.execute("INSERT INTO coach_payments VALUES (2,?,?,8,?)",
                             ("2026-11-26","reconciled",self.now.isoformat()))
-        self.assertIn("Подтверждено оплаченных дней: 1",self.cmd(8,"/school_status 1"))
+        status = self.cmd(8,"/school_status 1")
+        self.assertIn("Фактически платящих клиентов: 0", status)
+        self.assertIn("Оплаченных дней: 0", status)
+        with self.db:
+            self.db.execute("INSERT INTO coach_payments VALUES (2,?,?,8,?)",
+                            ("2026-12-03","reconciled-after-package",
+                             (self.now + dt.timedelta(days=7)).isoformat()))
+        status = self.cmd(8,"/school_status 1")
+        self.assertIn("Фактически платящих клиентов: 1", status)
+        self.assertIn("Оплаченных дней: 1", status)
+        self.assertIn("Первый заработок: участник школы", status)
+
+    def test_existing_enrolment_gets_the_included_seven_days_on_upgrade(self):
+        self.cmd(7, "/pilot_offer 8 demo")
+        self.cmd(7, "/pilot_paid 1 9900 | legacy")
+        with self.db:
+            self.db.execute("DELETE FROM school_included_coaching")
+        School(self.db)
+        self.assertEqual(self.db.execute("""
+            SELECT learner,tracker,starts,ends FROM school_included_coaching
+        """).fetchall(), [(8, 7, "2026-11-26", "2026-12-02")])
 
     def test_retention_counts_each_learner_once_across_orders_in_one_cohort(self):
         for order, buyer in enumerate((8, 8, 9), start=1):
@@ -137,3 +165,41 @@ class SchoolPilotTest(unittest.TestCase):
         self.assertNotIn("день 21",self.cmd(7,"/pilot_cohorts demo 2026-12-02",20))
         self.assertIn("Требуется роль оператора",self.cmd(8,"/pilot_cohorts demo",20))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_activity WHERE order_id=1").fetchone(),(1,))
+
+    def test_named_cohort_common_start_late_members_and_stable_denominator(self):
+        self.assertIn("Поток создан", self.cmd(7, "/pilot_cohort_create first-2026 2026-12-01 demo"))
+        self.assertIn("уже существует", self.cmd(7, "/pilot_cohort_create first-2026 2026-12-01 demo"))
+        self.cmd(7, "/pilot_offer 8 demo first-2026")
+        self.cmd(7, "/pilot_paid 1 9900 2026-11-28 | cohort-a")
+        self.cmd(7, "/pilot_offer 8 demo first-2026")
+        self.cmd(7, "/pilot_paid 2 9900 | cohort-b")
+        self.assertIn("ещё не открыт", self.cmd(8, "/school_day 1 1"))
+        self.assertEqual(self.db.execute("SELECT DISTINCT starts FROM school_enrolments").fetchall(),
+                         [("2026-12-01",)])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_memberships").fetchone(), (1,))
+
+        self.cmd(7, "/pilot_offer 9 demo first-2026", 7)
+        self.cmd(7, "/pilot_paid 3 9900 | cohort-late", 7)
+        self.assertEqual(self.db.execute("SELECT learner,initial FROM school_memberships ORDER BY learner").fetchall(),
+                         [(8, 1), (9, 0)])
+        self.cmd(8, "/school_day 1 7", 11)
+        preliminary = self.cmd(7, "/pilot_cohorts demo 2026-12-07", 11)
+        self.assertIn("first-2026", preliminary)
+        self.assertIn("предварительно, стартовый состав 1 из 1", preliminary)
+        self.assertIn("поздние 0 из 1", preliminary)
+        self.cmd(7, "/pilot_cohort_member first-2026 8 withdrawn", 12)
+        final = self.cmd(7, "/pilot_cohorts demo 2026-12-08", 12)
+        self.assertIn("итог, стартовый состав 1 из 1", final)
+        self.assertIn("вышли 1", final)
+
+        self.cmd(7, "/pilot_cohort_create second-2026 2027-01-10 demo", 12)
+        self.cmd(7, "/pilot_offer 8 demo second-2026", 12)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_memberships WHERE learner=8").fetchone(), (1,))
+        self.cmd(7, "/pilot_paid 4 9900 | cohort-c", 12)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_memberships WHERE learner=8").fetchone(), (2,))
+
+    def test_named_cohort_rejects_order_with_another_money_mode(self):
+        self.pilot.live_seller = "Рабочий продавец"
+        self.cmd(7, "/pilot_cohort_create demo-only 2026-12-01 demo")
+        self.assertIn("не совпадает", self.cmd(7, "/pilot_offer 8 live demo-only"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_orders").fetchone(), (0,))

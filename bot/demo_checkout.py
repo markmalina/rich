@@ -30,11 +30,13 @@ class Screen:
 
 
 class DemoCheckout:
-    def __init__(self, db, telegram, pilot, coaching=None):
+    def __init__(self, db, telegram, pilot, coaching=None, *, school_cohort=None, consent_version=None):
         self.db = db
         self.telegram = telegram
         self.pilot = pilot
         self.coaching = coaching
+        self.school_cohort = school_cohort
+        self.consent_version = consent_version
         db.execute("""
             CREATE TABLE IF NOT EXISTS pilot_tracking_days (
                 order_id INTEGER NOT NULL, day INTEGER NOT NULL, practice TEXT NOT NULL, recorded TEXT NOT NULL,
@@ -134,7 +136,8 @@ class DemoCheckout:
             """, (user,))
             buttons.extend((f"Оплатить день у трекера #{link} · 100 ₽", f"coachpay:{link}:{today:%Y%m%d}")
                            for link, weekdays, tracker in links
-                           if self.coaching.admits(tracker) and self.coaching.active_on(link, today, weekdays))
+                           if self.coaching.admits(tracker) and self.coaching.active_on(link, today, weekdays)
+                           and not self.coaching.included_in_school(link, today))
         return Screen(f"Выбери, что хочешь проверить.\n{NOTICE}", tuple(buttons))
 
     def tracking_offer(self):
@@ -143,16 +146,28 @@ class DemoCheckout:
 
     def offer(self, user, kind, now, source=None):
         price = TRACKING_PRICE if kind == "tracking" else self.pilot.price
-        self.db.execute("""
-            INSERT INTO pilot_orders(buyer,kind,total,demo,source,seller,created)
-            SELECT ?,?,?,1,?,'Учебная сверка',? WHERE NOT EXISTS (
-                SELECT 1 FROM pilot_orders WHERE buyer=? AND kind=? AND demo=1 AND state<>'cancelled'
+        order_id = None
+        if kind == "package" and self.school_cohort:
+            found = self.db.execute("""
+                SELECT o.id FROM pilot_orders o JOIN school_order_cohorts c ON c.order_id=o.id
+                WHERE o.buyer=? AND o.kind='package' AND o.demo=1 AND o.state<>'cancelled' AND c.cohort=?
+                ORDER BY (o.state='awaiting') DESC,o.id DESC LIMIT 1
+            """, (user, self.school_cohort)).fetchone()
+            order_id = found[0] if found else self.pilot.new_order(
+                user, kind, price, True, source, now,
             )
-        """, (user, kind, price, source, now.isoformat(), user, kind))
-        (order_id,) = self.db.execute("""
-            SELECT id FROM pilot_orders WHERE buyer=? AND kind=? AND demo=1 AND state<>'cancelled'
-            ORDER BY (state='awaiting') DESC,id DESC LIMIT 1
-        """, (user, kind)).fetchone()
+            self.pilot.school.assign_order(order_id, self.school_cohort, "rehearsal", self.consent_version)
+        else:
+            self.db.execute("""
+                INSERT INTO pilot_orders(buyer,kind,total,demo,source,seller,created)
+                SELECT ?,?,?,1,?,'Учебная сверка',? WHERE NOT EXISTS (
+                    SELECT 1 FROM pilot_orders WHERE buyer=? AND kind=? AND demo=1 AND state<>'cancelled'
+                )
+            """, (user, kind, price, source, now.isoformat(), user, kind))
+            (order_id,) = self.db.execute("""
+                SELECT id FROM pilot_orders WHERE buyer=? AND kind=? AND demo=1 AND state<>'cancelled'
+                ORDER BY (state='awaiting') DESC,id DESC LIMIT 1
+            """, (user, kind)).fetchone()
         if source:
             self.db.execute("""
                 UPDATE pilot_orders SET source=? WHERE id=? AND state='awaiting' AND source IS NULL
@@ -213,7 +228,8 @@ class DemoCheckout:
         row = self.db.execute("""
             SELECT tracker,weekdays FROM coach_links WHERE id=? AND client=? AND state='active' AND demo=1
         """, (link, user)).fetchone()
-        if not row or not self.coaching.admits(row[0]) or not self.coaching.active_on(link, today, row[1]):
+        if (not row or not self.coaching.admits(row[0]) or not self.coaching.active_on(link, today, row[1])
+                or self.coaching.included_in_school(link, today)):
             raise Clarification("Доступного учебного дня в этой связи нет.")
         if confirmed:
             self.db.execute("INSERT INTO coach_payments VALUES (?,?,?,?,?) ON CONFLICT(link,day) DO NOTHING",

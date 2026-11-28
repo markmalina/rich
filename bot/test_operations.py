@@ -186,7 +186,10 @@ class OperationsTest(unittest.TestCase):
         command(9,"/coach_report 1 | да")
         command(9,"/coach_share 1")
         self.assertIn("сохранено",command(8,f"/coach_paid 1 {self.now.date()} | day-receipt"))
-        self.assertIn("Реальных клиентов: 1. Подтверждено оплаченных дней: 1",self.call(8,f"/school_status {order}"))
+        status = self.call(8, f"/school_status {order}")
+        self.assertIn("Подтверждённая практика: 1", status)
+        self.assertIn("Фактически платящих клиентов: 1", status)
+        self.assertIn("Оплаченных дней: 1", status)
         for action in ("reserve","ship","deliver"):
             self.call(7,f"/pilot_stock {order} {action} 21 | kit-{action}")
         self.assertIn("вручено 21",self.call(8,f"/pilot_delivery {order}"))

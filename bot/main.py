@@ -807,7 +807,11 @@ def main():
             bot.pilot_orders = pilot_class(bot.db, telegram, bot.owner, live_seller=seller)
             if demo_checkout:
                 bot.voice_check = VoiceCheck(telegram)
-                bot.demo_checkout = DemoCheckout(bot.db, telegram, bot.pilot_orders, bot.coaching)
+                bot.demo_checkout = DemoCheckout(
+                    bot.db, telegram, bot.pilot_orders, bot.coaching,
+                    school_cohort=os.environ.get("TRACKER_SCHOOL_COHORT"),
+                    consent_version=bot.terms_version,
+                )
         if os.environ.get("TRACKER_OPERATIONS") == "1":
             try:
                 bot.operations = Operations(bot.db, telegram, bot.owner, data,
