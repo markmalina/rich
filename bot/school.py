@@ -78,6 +78,19 @@ class School:
                 order_id INTEGER NOT NULL, active_on TEXT NOT NULL, PRIMARY KEY(order_id,active_on)
             );
         """)
+        # Legacy rows establish that work was shared, but do not identify the
+        # assignment that was authorised. Preserve them for the learner only.
+        additions = {
+            "school_enrolments": {"mentor_revision": "INTEGER NOT NULL DEFAULT 1"},
+            "school_work": {"shared_with": "INTEGER", "mentor_revision": "INTEGER"},
+            "school_comments": {"mentor_revision": "INTEGER"},
+        }
+        with db:
+            for table, columns in additions.items():
+                existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                for column, definition in columns.items():
+                    if column not in existing:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def enrol(self, order_id, learner, mentor, starts):
         self.db.execute("INSERT OR IGNORE INTO school_enrolments(order_id,learner,mentor,starts,version) VALUES (?,?,?,?,?)",
@@ -104,19 +117,19 @@ class School:
 
     def handle(self, command, order_id, words, fields, user, now, update_id):
         item = self.db.execute("""
-            SELECT learner,mentor,starts,version,finished,suspended
+            SELECT learner,mentor,starts,version,finished,suspended,mentor_revision
             FROM school_enrolments WHERE order_id=? AND (learner=? OR mentor=?)
         """, (order_id,user,user)).fetchone()
         if not item:
             raise Clarification("Зачисление не найдено или ещё ждёт подтверждения.")
-        learner,mentor,starts,version,finished,suspended = item
+        learner,mentor,starts,version,finished,suspended,revision = item
         if suspended:
             raise Clarification("Доступ к курсу приостановлен оператором. Условия заказа доступны отдельно.")
         unlocked = school_day(starts,now)
         if command == "/school_status":
             return self.status(learner, version, unlocked, finished)
         if command == "/school_history":
-            return self.history(order_id,user == mentor)
+            return self.history(order_id, None if user == learner else mentor, revision)
         if command == "/school_finish":
             if user != mentor or unlocked != 21:
                 raise Clarification("Завершение подтверждает наставник после открытия дня 21.")
@@ -135,30 +148,51 @@ class School:
             if user == learner:
                 self.mark_active(order_id, now)
             return f"День {day}/21 · {module} · {name}\n{task}\nДата старта {starts} МСК. Версия {version}."
-        if command in {"/school_work","/school_share"} and user == learner and len(fields)==1 and not finished:
+        if command in {"/school_work","/school_share"} and user == learner and len(fields)==1:
             work = clean_space(fields[0])
-            self.db.execute("INSERT OR IGNORE INTO school_work VALUES (?,?,?,?,?,?,?)",
-                            (order_id,day,update_id,learner,work,int(command=="/school_share"),now.isoformat()))
-            self.mark_active(order_id, now)
-            return ("Работа передана твоему наставнику." if command=="/school_share" else
+            share = command == "/school_share"
+            if finished:
+                existing = self.db.execute(
+                    "SELECT 1 FROM school_work WHERE order_id=? AND day=? AND learner=? AND text=? LIMIT 1",
+                    (order_id, day, learner, work),
+                ).fetchone()
+                if not share or not existing:
+                    raise Clarification("После завершения можно передать наставнику только свою сохранённую работу.")
+            self.db.execute("""
+                INSERT OR IGNORE INTO school_work
+                (order_id,day,update_id,learner,text,shared,submitted,shared_with,mentor_revision)
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (order_id,day,update_id,learner,work,int(share),now.isoformat(),
+                  mentor if share else None, revision if share else None))
+            if not finished:
+                self.mark_active(order_id, now)
+            return ("Работа передана твоему наставнику." if share else
                     "Личный черновик сохранён. Для проверки наставником нужно явно отправить /school_share.")
         if command == "/school_feedback" and user == mentor and len(fields)==1:
-            if not self.db.execute("SELECT 1 FROM school_work WHERE order_id=? AND day=? AND shared=1",
-                                   (order_id,day)).fetchone():
+            delivered = self.db.execute("""
+                SELECT 1 FROM school_work
+                WHERE order_id=? AND day=? AND shared_with=? AND mentor_revision=? LIMIT 1
+            """, (order_id,day,mentor,revision)).fetchone()
+            if not delivered:
                 raise Clarification("Ученик пока не передал работу наставнику.")
-            self.db.execute("INSERT OR IGNORE INTO school_comments VALUES (?,?,?,?,?,?)",
-                            (order_id,day,update_id,mentor,clean_space(fields[0]),now.isoformat()))
+            self.db.execute("""
+                INSERT OR IGNORE INTO school_comments
+                (order_id,day,update_id,mentor,text,submitted,mentor_revision) VALUES (?,?,?,?,?,?,?)
+            """, (order_id,day,update_id,mentor,clean_space(fields[0]),now.isoformat(),revision))
             return "Комментарий доступен ученику."
         raise Clarification("Команда недоступна. Список: /school.")
 
-    def history(self, order_id, mentor):
+    def history(self, order_id, recipient, revision):
         rows = self.db.execute("""
-            SELECT day,text,shared FROM school_work WHERE order_id=? AND (shared=1 OR ?=0)
+            SELECT day,text,shared FROM school_work
+            WHERE order_id=? AND (? IS NULL OR (shared_with=? AND mentor_revision=?))
             ORDER BY update_id DESC LIMIT 5
-        """,(order_id,int(mentor))).fetchall()
+        """,(order_id,recipient,recipient,revision)).fetchall()
         comments = self.db.execute("""
-            SELECT day,text FROM school_comments WHERE order_id=? ORDER BY update_id DESC LIMIT 5
-        """,(order_id,)).fetchall()
+            SELECT day,text FROM school_comments
+            WHERE order_id=? AND (? IS NULL OR (mentor=? AND mentor_revision=?))
+            ORDER BY update_id DESC LIMIT 5
+        """,(order_id,recipient,recipient,revision)).fetchall()
         return "\n".join([*(f"День {d} · {'передано' if shared else 'личный черновик'}: {note}" for d,note,shared in rows),
                          *(f"День {d} · наставник: {note}" for d,note in comments)]) or "Доступных работ и комментариев пока нет."
 

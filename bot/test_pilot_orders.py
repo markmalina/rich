@@ -69,7 +69,7 @@ class SchoolPilotTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_work").fetchone(),(4,))
         self.cmd(7,"/pilot_mentor 1 10",20)
         self.assertIn("не найдено",self.cmd(7,"/school_history 1",20))
-        self.assertIn("Учебная работа",self.cmd(10,"/school_history 1",20))
+        self.assertNotIn("Учебная работа",self.cmd(10,"/school_history 1",20))
         with patch.dict(PROGRAMS, {"v2":PROGRAMS[VERSION]}), patch("bot.school.VERSION","v2"):
             self.cmd(7,"/pilot_offer 8 demo",20)
             self.cmd(7,"/pilot_paid 2 9900 | demo-b",20)
