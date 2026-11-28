@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import datetime as dt
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest.mock import Mock, patch
 
 from .coaching import Coaching
 from .ledger import MOSCOW
+from .main import Bot
 from .operations import (Operations, apply_privacy, copy_database, restore_database,
                          verify_snapshot_manifest, write_snapshot_manifest)
 from .providers import ProviderError
@@ -128,6 +130,71 @@ class OperationsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,"database"):
             restore_database(external_source,rejected,external_ledger,manifest)
         self.assertFalse(rejected.exists())
+
+    def test_closed_pilot_restore_preserves_refund_and_queue_without_reviving_access(self):
+        terms = "Учебные условия восстановления"
+        source_root = self.root / "source"
+        source_root.mkdir()
+        destination_root = self.root / "target"
+        destination_root.mkdir()
+        bot = Bot(self.tg, None, None, source_root, 7, admitted={8}, terms=terms)
+        with closing(bot.db):
+            bot.pilot_orders = Sales(bot.db, self.tg, 7)
+            ops = Operations(bot.db, self.tg, 7, source_root)
+            self.addCleanup(ops.ledger.close)
+            now = self.now
+
+            def private(app, number, user, text, time):
+                item = {"from": {"id": user}, "chat": {"type": "private", "id": user}, "text": text}
+                with app.db:
+                    app.db.execute("INSERT INTO receipts VALUES (?,?)", (number, time.isoformat()))
+                app.process_update({"message": item, "update_id": number})
+
+            old_token = f"/pilot_consent {bot.terms_version}"
+            private(bot, 1, 8, old_token, now)
+            private(bot, 2, 7, "/pilot_offer 8 demo | fixture", now)
+            private(bot, 3, 7, "/pilot_paid 1 9900 | freeze-receipt", now)
+            private(bot, 4, 8, "/school_work 1 1 | private fixture", now)
+            private(bot, 5, 8, "/pilot_refund_request 1", now)
+            private(bot, 6, 7, "/pilot_refund 1 100 | freeze-refund", now)
+            bot.inbox_writes.defer(7, 8, {"text": "pending fixture", "from": {"id": 8},
+                                        "chat": {"type": "private", "id": 8}}, now, onboarding=True)
+            bundle = ops.snapshot(now.date())
+            bundled_ledger = ops.storage / f"rx-{now.date()}-erasures.sqlite"
+            manifest = ops.storage / f"rx-{now.date()}.manifest.json"
+
+            bot.operations = ops
+            later = now + dt.timedelta(minutes=1)
+            private(bot, 8, 8, "/pilot_withdraw", later)
+            self.assertFalse(bot.has_private_access(8))
+            private(bot, 9, 8, "/pilot_privacy school", later)
+            self.assertIn("Запрос получен", self.tg.message.call_args.args[1])
+            private(bot, 10, 7, "/pilot_purge_school 8", later)
+            self.assertIn("обработаны", self.tg.message.call_args.args[1])
+            latest = self.root / "latest-erasures.sqlite"
+            copy_database(ops.ledger, latest)
+
+            restore_database(bundle, destination_root / "bot.sqlite", bundled_ledger, manifest,
+                             current_ledger_path=latest)
+
+        restored = Bot(self.tg, None, None, destination_root, 7, provisioner=Mock(),
+                       admitted={8}, terms=terms)
+        self.addCleanup(restored.db.close)
+        restored.pilot_orders = Sales(restored.db, self.tg, 7)
+        self.assertFalse(restored.has_private_access(8))
+        private(restored, 11, 8, old_token, later)
+        self.assertFalse(restored.has_private_access(8))
+        restored.reconcile_inbox(12)
+        restored.provisioner.provision.assert_not_called()
+        self.assertTrue(restored.inbox_writes.waiting(8))
+        self.assertTrue(restored.inbox_writes.needs_onboarding(7))
+        self.assertEqual(restored.db.execute("SELECT COUNT(*) FROM school_work").fetchone(), (0,))
+        self.assertEqual(restored.db.execute("SELECT suspended FROM school_enrolments").fetchone(), (1,))
+        private(restored, 12, 7, "/pilot_refund 1 100 | freeze-refund", later)
+        self.assertIn("уже подтверждён", self.tg.message.call_args.args[1])
+        self.assertEqual(restored.db.execute("SELECT amount FROM pilot_refunds").fetchall(), [(10000,)])
+        self.assertEqual(restored.db.execute("SELECT units FROM pilot_kits").fetchall(), [(21,)])
+        self.assertEqual(restored.db.execute("PRAGMA integrity_check").fetchone(), ("ok",))
 
     def test_failed_restore_never_publishes_private_data_and_can_be_retried(self):
         order=self.enrol(8,"fixture")

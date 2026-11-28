@@ -25,7 +25,7 @@ from .ledger import (
 )
 from .manual import HELP as MANUAL_HELP, RECORD_COMMAND, parse_manual
 from .onboarding import OAUTH_KEYS, PilotProvisioner, oauth_session
-from .operations import Operations
+from .operations import CONSENT_EPOCH, Operations
 from .pilot import Pilot
 from .pilot_check import (
     BOT_USERNAME, GOOGLE_EMAIL, PILOT_CONFIG_REQUIRED, SCRIPT_SETTINGS, legacy_google_settings, report_config,
@@ -117,7 +117,6 @@ class Bot:
                  *, admitted=None, terms=None):
         self.admitted = admitted if admitted is None or owner is None else admitted | {owner}
         self.terms = terms
-        self.terms_version = sha256(terms.encode()).hexdigest() if terms is not None else None
         self.telegram = telegram
         self.sheets = sheets
         self.model = model
@@ -135,7 +134,11 @@ class Bot:
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS receipts (id INTEGER PRIMARY KEY, received TEXT NOT NULL)")
-        if self.terms_version is not None:
+        self.terms_version = None
+        if terms is not None:
+            epoch = self.get(CONSENT_EPOCH)
+            notice = terms if epoch is None else terms + "\0" + epoch
+            self.terms_version = sha256(notice.encode()).hexdigest()
             self.db.execute("""
                 CREATE TABLE IF NOT EXISTS private_consents (
                     user INTEGER PRIMARY KEY, version TEXT, received TEXT NOT NULL, update_id INTEGER NOT NULL
@@ -288,6 +291,11 @@ class Bot:
         message = update.get("message", {})
         if message.get("chat", {}).get("type") == "private":
             if not self.admit_private(message):
+                return
+            # Privacy requests must remain reachable while diary processing is paused.
+            if (self.terms_version is not None and self.operations is not None
+                    and message.get("text", "").strip().partition(" ")[0] == "/pilot_privacy"):
+                self.operations.handle(update_id, message["from"]["id"], message, received)
                 return
             if self.handle_terms(message["from"]["id"], message.get("text", ""), update_id, received):
                 return

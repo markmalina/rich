@@ -4,6 +4,7 @@
 """Local recovery and privacy operations for the pilot, separate from Google journals."""
 
 import argparse
+from contextlib import closing, nullcontext
 import datetime as dt
 import hashlib
 import io
@@ -14,6 +15,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import tempfile
+from uuid import uuid4
 
 from .coaching import day_arg, valid_id
 from .ledger import Clarification, MOSCOW
@@ -24,13 +26,14 @@ TABLES = {"pilot_orders", "school_enrolments", "pilot_kits", "pilot_stock", "pil
 ALERT_INTERVAL = dt.timedelta(minutes=1)
 WARNING_QUEUE_SECONDS = 15 * 60
 SNAPSHOT_FORMAT = "rich-recovery-bundle-v1"
+CONSENT_EPOCH = "private_consent_epoch"
 
 
 def table_exists(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
-def copy_database(source, destination, *, overwrite=False, deletion_ledger=None):
+def copy_database(source, destination, *, overwrite=False, deletion_ledger=None, prepare=None):
     destination=Path(destination)
     if not overwrite and destination.exists():
         raise FileExistsError("destination already exists")
@@ -41,9 +44,11 @@ def copy_database(source, destination, *, overwrite=False, deletion_ledger=None)
         target=sqlite3.connect(tmp)
         try:
             source.backup(target)
-            if deletion_ledger is not None:
-                with target:
+            with target:
+                if deletion_ledger is not None:
                     apply_privacy(target,deletion_ledger)
+                if prepare is not None:
+                    prepare(target)
             if target.execute("PRAGMA quick_check").fetchone()!=("ok",):
                 raise RuntimeError("SQLite verification failed")
         finally:
@@ -122,15 +127,26 @@ def verify_snapshot_manifest(database, deletion_ledger, manifest):
     return record
 
 
-def restore_database(source_path, destination, deletion_ledger_path, manifest):
+def restore_database(source_path, destination, deletion_ledger_path, manifest, *, current_ledger_path=None):
     verify_snapshot_manifest(source_path, deletion_ledger_path, manifest)
-    source = sqlite3.connect(Path(source_path).resolve().as_uri() + "?mode=ro", uri=True)
-    ledger = sqlite3.connect(Path(deletion_ledger_path).resolve().as_uri() + "?mode=ro", uri=True)
-    try:
-        copy_database(source, destination, deletion_ledger=ledger)
-    finally:
-        source.close()
-        ledger.close()
+    if current_ledger_path is not None:
+        snapshot_evidence(current_ledger_path)
+
+    def read_database(path):
+        return closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True))
+
+    current_context = read_database(current_ledger_path) if current_ledger_path is not None else nullcontext()
+    with current_context as current, read_database(source_path) as source, read_database(deletion_ledger_path) as bundled:
+        def prepare(target):
+            if current is not None:
+                current.execute("SELECT user, recorded FROM erasures LIMIT 0")
+                apply_privacy(target, current)
+            if table_exists(target, "private_consents"):
+                target.execute("UPDATE private_consents SET version=NULL")
+                target.execute("INSERT OR REPLACE INTO state(key, value) VALUES (?, ?)",
+                               (CONSENT_EPOCH, json.dumps(uuid4().hex)))
+
+        copy_database(source, destination, deletion_ledger=bundled, prepare=prepare)
 
 
 def apply_privacy(db, ledger):
@@ -372,14 +388,16 @@ def main():
     parser.add_argument("destination",type=Path)
     parser.add_argument("--deletion-ledger",type=Path,required=True)
     parser.add_argument("--manifest",type=Path,required=True)
+    parser.add_argument("--current-deletion-ledger",type=Path,
+                        help="fresh verified copy of the deletion journal, in addition to the bundled copy")
     args=parser.parse_args()
     if not args.source.is_file() or not args.deletion_ledger.is_file() or not args.manifest.is_file():
         parser.error("source, deletion ledger and manifest must exist")
     try:
-        verify_snapshot_manifest(args.source,args.deletion_ledger,args.manifest)
-    except RuntimeError as exc:
+        restore_database(args.source,args.destination,args.deletion_ledger,args.manifest,
+                         current_ledger_path=args.current_deletion_ledger)
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
         parser.error(str(exc))
-    restore_database(args.source,args.destination,args.deletion_ledger,args.manifest)
     print("SQLite: копия восстановлена, журнал удалений применён.")
 
 
