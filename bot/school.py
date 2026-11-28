@@ -90,14 +90,14 @@ class School:
     def cohorts(self, demo, through):
         return self.db.execute("""
             WITH checkpoints(day) AS (VALUES (7),(21)), eligible AS (
-                SELECT e.order_id,e.starts,e.version,c.day,date(e.starts,'+'||(c.day-1)||' days') AS target
+                SELECT e.order_id,e.learner,e.starts,e.version,c.day,date(e.starts,'+'||(c.day-1)||' days') AS target
                 FROM school_enrolments e JOIN pilot_orders o ON o.id=e.order_id CROSS JOIN checkpoints c
                 WHERE o.kind='package' AND o.state='paid' AND o.demo=?
             )
-            SELECT starts,version,day,COUNT(*),SUM(CASE WHEN
+            SELECT starts,version,day,COUNT(DISTINCT learner),COUNT(DISTINCT CASE WHEN
                 EXISTS (SELECT 1 FROM school_activity a WHERE a.order_id=e.order_id AND a.active_on=e.target)
                 OR EXISTS (SELECT 1 FROM school_work w WHERE w.order_id=e.order_id AND substr(w.submitted,1,10)=e.target)
-                THEN 1 ELSE 0 END)
+                THEN learner END)
             FROM eligible e WHERE target<=? GROUP BY starts,version,day
             ORDER BY starts DESC,version,day LIMIT 32
         """, (int(demo), through.isoformat())).fetchall()

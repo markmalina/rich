@@ -11,6 +11,7 @@ from uuid import uuid4
 from .ledger import Clarification, MOSCOW
 from .pilot import ORDER_TITLES, PACK, PORTION, TRACKING_PRICE, rub
 from .providers import ProviderError
+from .school import school_day
 
 NOTICE = "Учебная оплата. Деньги не списываются, чек не формируется."
 JAR_START = re.compile(r"/start tracking_(GR[0-9]{6})")
@@ -167,7 +168,7 @@ class DemoCheckout:
         order = self.get_order(order_id, user)
         _, kind, total, _, _, _, state = order
         if state == "paid":
-            return self.after_payment(order_id, kind, now)
+            return self.after_payment(order_id, kind, user, now)
         title = f"{ORDER_TITLES[kind]} · {rub(total)} · заказ #{order_id}."
         gift = f"\nГранола в подарок: {PACK} банок по {PORTION} г." if kind in {"package", "tracking"} else ""
         if prepare:
@@ -181,12 +182,23 @@ class DemoCheckout:
             today = now.astimezone(MOSCOW).date()
             self.pilot.confirm(order_id, order, f"demo-self:{order_id}:{uuid4().hex}", today, user, now,
                                mentor=self.pilot.owner)
-        return self.after_payment(order_id, order[1], now)
+        return self.after_payment(order_id, order[1], user, now)
 
-    def after_payment(self, order_id, kind, now):
+    def after_payment(self, order_id, kind, user, now):
         text = "Учебная оплата подтверждена. Деньги не списаны."
         if kind == "package":
-            return Screen(f"{text}\nШкола открыта: /school_day {order_id}. Учебная выдача: /pilot_delivery {order_id}.")
+            enrolment = self.db.execute(
+                "SELECT suspended,starts FROM school_enrolments WHERE order_id=? AND learner=?", (order_id, user)
+            ).fetchone()
+            if enrolment is None:
+                access = "Зачисление ожидает сверки с оператором."
+            elif enrolment[0]:
+                access = "Доступ к курсу приостановлен оператором."
+            elif school_day(enrolment[1], now) == 0:
+                access = f"Первый урок откроется {enrolment[1]} по МСК."
+            else:
+                access = f"Школа открыта: /school_day {order_id}."
+            return Screen(f"{text}\n{access} Учебная выдача: /pilot_delivery {order_id}.")
         if kind == "tracking":
             return self.tracking_screen(order_id, now, label=text)
         return Screen(f"{text}\nУчебная выдача: /pilot_delivery {order_id}.")

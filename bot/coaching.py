@@ -359,17 +359,20 @@ class Coaching:
                 f"Подтверждено: {confirmed} · {confirmed*100} ₽. {mode}")
 
     def send_due(self, now):
-        today, clock = now.date(), now.strftime("%H:%M")
+        local = now.astimezone(MOSCOW)
+        today = local.date().isoformat()
         rows = self.db.execute("""
-            SELECT id,client,weekdays FROM coach_links WHERE state='active' AND reminder<=?
-            AND NOT EXISTS (SELECT 1 FROM coach_notices WHERE link=coach_links.id AND day=?)
-            ORDER BY reminder LIMIT 25
-        """, (clock, str(today))).fetchall()
-        for link, client, weekdays in rows:
-            if not self.active_on(link,today,weekdays):
-                continue
+            SELECT l.id, l.client FROM coach_links l
+            WHERE l.state='active' AND l.reminder<=:clock
+              AND instr(',' || l.weekdays || ',', ',' || :weekday || ',') > 0
+              AND (SELECT c.active FROM coach_calendar c WHERE c.link=l.id AND c.day<=:today
+                   ORDER BY c.day DESC LIMIT 1) = 1
+              AND NOT EXISTS (SELECT 1 FROM coach_notices n WHERE n.link=l.id AND n.day=:today)
+            ORDER BY l.reminder, l.id LIMIT 25
+        """, {"clock": local.strftime("%H:%M"), "weekday": WEEK[local.weekday()], "today": today}).fetchall()
+        for link, client in rows:
             with self.db:
-                sent = self.db.execute("INSERT OR IGNORE INTO coach_notices VALUES (?,?,'pending')", (link, str(today)))
+                sent = self.db.execute("INSERT OR IGNORE INTO coach_notices VALUES (?,?,'pending')", (link, today))
             if not sent.rowcount:
                 continue
             status = "sent"
@@ -379,7 +382,7 @@ class Coaching:
                 # After a lost response a retry could send the same reminder twice.
                 status = "failed" if error.status in {400,401,403,429} else "uncertain"
             with self.db:
-                self.db.execute("UPDATE coach_notices SET delivery=? WHERE link=? AND day=?", (status,link,str(today)))
+                self.db.execute("UPDATE coach_notices SET delivery=? WHERE link=? AND day=?", (status,link,today))
 
 
 def valid_id(text):
