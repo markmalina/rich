@@ -3,7 +3,8 @@
 
 import datetime as dt
 import fcntl
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
+from hashlib import sha256
 from io import StringIO
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
+from .ledger import INBOX_HEADERS, MOSCOW
+from .main import main as run_worker
 from .onboarding import DRIVE_ABOUT_URL, DRIVE_URL, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
 from .pilot_check import closed_config, check, local_database, main, verify_telegram
 from .providers import ProviderError
@@ -227,6 +230,71 @@ class ClosedPilotPreflightTest(unittest.TestCase):
                     "pilot_tracking_days", "privacy_requests", "deferred_inbox", "event_writes"}
         tables = {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue(required <= tables)
+
+    def test_cold_launch_uses_prepared_cohort_through_the_worker_entrypoint(self):
+        path = self.data / "bot.sqlite"
+        now = dt.datetime.now(MOSCOW)
+        env = {**self.env, "TRACKER_PRIVATE_ADMISSION_IDS": "[8]"}
+        argv = ["pilot_check", "--closed", "--local-only", "--expect-restored", "--database", str(path),
+                "--forbid-bot", "PersonalBot", "--forbid-data-dir", str(Path(self.root.name) / "personal"),
+                "--init-cohort", now.date().isoformat()]
+        with patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv), redirect_stdout(StringIO()):
+            main()
+
+        def message(number, user, text):
+            return {"update_id": number, "message": {"from": {"id": user},
+                    "chat": {"id": user, "type": "private"}, "text": text}}
+
+        def click(number, value):
+            return {"update_id": number, "callback_query": {"id": str(number), "from": {"id": 8},
+                    "data": value, "message": {"chat": {"id": 8, "type": "private"}}}}
+
+        consent = sha256(env["TRACKER_PRIVATE_TERMS"].encode()).hexdigest()
+        batch = [message(1, 9, "/start tracking_GR020010"),
+                 message(2, 8, "/start tracking_GR020010"),
+                 message(3, 8, f"/pilot_consent {consent}"),
+                 message(4, 8, "/start tracking_GR020010"),
+                 click(5, "dp:pay:1"), click(6, "dp:paid:1"), click(7, "dp:paid:1"),
+                 message(8, 8, "/pay"), click(9, "dp:offer:package"),
+                 click(10, "dp:pay:2"), click(11, "dp:paid:2"), message(12, 8, "/school_day 2")]
+        tg = Mock()
+        updates = iter([batch])
+
+        def api(method, body):
+            if method == "getMe":
+                return {"username": env["TRACKER_PILOT_BOT_USERNAME"], "id": 900, "is_bot": True}
+            if method == "getWebhookInfo":
+                return {"url": ""}
+            if method == "getUpdates":
+                pending = next(updates, None)
+                if pending is None:
+                    raise KeyboardInterrupt
+                return pending
+            self.assertIn(method, {"sendMessage", "answerCallbackQuery"})
+            return True
+
+        tg.api.side_effect = api
+        headers = {"'Входящие'!A1:H1": [INBOX_HEADERS], "'События'!I1": [["ID входящего"]]}
+        sheets = Mock()
+        sheets.read.side_effect = headers.__getitem__
+        with (patch.dict(os.environ, env, clear=True), patch.dict(sys.modules, {"requests": Mock()}),
+              patch("bot.main.Telegram", return_value=tg), patch("bot.main.ScriptSheets", return_value=sheets),
+              patch("bot.main.oauth_session", return_value=Mock()), patch("bot.main.PilotProvisioner") as drive,
+              patch("bot.main.Model") as model, patch("bot.main.time.sleep", side_effect=AssertionError("wait")),
+              self.assertRaises(KeyboardInterrupt)):
+            run_worker()
+        drive.return_value.verify_registry.assert_called_once_with(env["TRACKER_PILOT_GOOGLE_EMAIL"])
+        drive.return_value.provision.assert_not_called()
+        model.assert_not_called()
+        self.assertIn("день 1/21", tg.message.call_args.args[1].lower())
+        with closing(sqlite3.connect(path)) as db:
+            self.assertEqual(db.execute("SELECT buyer,kind,source,state,demo FROM pilot_orders ORDER BY id").fetchall(),
+                             [(8, "tracking", "GR020010", "paid", 1), (8, "package", None, "paid", 1)])
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(), (2,))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM operational_poll").fetchone(), (1,))
+            self.assertEqual(db.execute("SELECT cohort FROM school_order_cohorts").fetchone(),
+                             (env["TRACKER_SCHOOL_COHORT"],))
+            self.assertEqual(db.execute("PRAGMA integrity_check").fetchone(), ("ok",))
 
     def test_clean_volume_refuses_unknown_files_and_held_worker_lock(self):
         self.data.mkdir()
