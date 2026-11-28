@@ -4,6 +4,7 @@
 """Private Life Tracker agreements and manually reconciled days."""
 
 import datetime as dt
+import json
 from decimal import Decimal
 import re
 from secrets import token_urlsafe
@@ -38,11 +39,12 @@ HELP = """Личное сопровождение в eRex
 
 
 class Coaching:
-    def __init__(self, db, telegram, owner, *, demo_only=False):
+    def __init__(self, db, telegram, owner, *, demo_only=False, admitted=None):
         self.db = db
         self.telegram = telegram
         self.owner = owner
         self.demo_only = demo_only
+        self._admitted = admitted
         db.executescript("""
             CREATE TABLE IF NOT EXISTS coach_roles (user INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS coach_invites (
@@ -85,6 +87,22 @@ class Coaching:
                 update_id INTEGER PRIMARY KEY, user INTEGER NOT NULL, response TEXT NOT NULL
             );
         """)
+
+    def admits(self, user):
+        return self._admitted is None or self._admitted(user)
+
+    def included_in_school(self, link, day):
+        if not self.db.execute("""
+                SELECT 1 FROM sqlite_master WHERE type='table' AND name='school_included_coaching'
+        """).fetchone():
+            return False
+        return self.db.execute("""
+            SELECT 1 FROM school_included_coaching s
+            JOIN school_enrolments e ON e.order_id=s.order_id AND e.suspended=0
+            JOIN coach_links l ON l.id=?
+            WHERE s.learner=l.client AND s.tracker=l.tracker AND ? BETWEEN s.starts AND s.ends
+            LIMIT 1
+        """, (link, str(day))).fetchone() is not None
 
     def handle(self, update_id, user, message, received):
         raw = message.get("text", "").strip()
@@ -144,6 +162,8 @@ class Coaching:
             if not invite or dt.datetime.fromisoformat(invite[1]) <= now or invite[0] == user:
                 raise Clarification("Приглашение недействительно. Возьми новое у трекера.")
             tracker, _, demo = invite
+            if not self.admits(tracker):
+                raise Clarification("Трекер сейчас вне закрытого потока. Возьми новое приглашение после восстановления допуска.")
             if self.demo_only and not demo:
                 raise Clarification("Сейчас доступны учебные приглашения. Возьми новое у трекера.")
             existing = self.db.execute("""
@@ -171,6 +191,10 @@ class Coaching:
             raise Clarification("Связь не найдена.")
         client, tracker, state, demo, practice, minimum, weekdays, fallback, window, _ = row
         is_client = user == client
+        counterparty = tracker if is_client else client
+        if (not self.admits(counterparty)
+                and not (is_client and command in {"/coach_end", "/coach_view", "/coach_days"})):
+            raise Clarification("Связь приостановлена: второй участник сейчас вне закрытого потока.")
         if command == "/coach_end" and is_client:
             self.db.execute("UPDATE coach_links SET state='ended',reminder=NULL WHERE id=?", (link,))
             self.schedule(link, today+STEP, False)
@@ -224,6 +248,8 @@ class Coaching:
         if command == "/coach_paid" and not is_client:
             if self.demo_only:
                 raise Clarification("Сейчас доступна только учебная оплата клиентом через /pay.")
+            if self.included_in_school(link, day):
+                raise Clarification("Этот день сопровождения входит в пакет школы 9 900 ₽.")
             self.require_active_day(link, day, today, weekdays)
             basis, = limited_fields(fields, 1)
             old = self.db.execute("SELECT basis FROM coach_payments WHERE link=? AND day=?", (link, str(day))).fetchone()
@@ -358,18 +384,23 @@ class Coaching:
         return (f"{start:%d.%m}–{finish:%d.%m} МСК. Активных дней: {len(obligations)} · {len(obligations)*100} ₽. "
                 f"Подтверждено: {confirmed} · {confirmed*100} ₽. {mode}")
 
-    def send_due(self, now):
+    def send_due(self, now, *, admitted=None):
         local = now.astimezone(MOSCOW)
         today = local.date().isoformat()
         rows = self.db.execute("""
             SELECT l.id, l.client FROM coach_links l
             WHERE l.state='active' AND l.reminder<=:clock
+              AND (:admitted IS NULL OR (
+                l.client IN (SELECT value FROM json_each(:admitted))
+                AND l.tracker IN (SELECT value FROM json_each(:admitted))
+              ))
               AND instr(',' || l.weekdays || ',', ',' || :weekday || ',') > 0
               AND (SELECT c.active FROM coach_calendar c WHERE c.link=l.id AND c.day<=:today
                    ORDER BY c.day DESC LIMIT 1) = 1
               AND NOT EXISTS (SELECT 1 FROM coach_notices n WHERE n.link=l.id AND n.day=:today)
             ORDER BY l.reminder, l.id LIMIT 25
-        """, {"clock": local.strftime("%H:%M"), "weekday": WEEK[local.weekday()], "today": today}).fetchall()
+        """, {"clock": local.strftime("%H:%M"), "weekday": WEEK[local.weekday()], "today": today,
+              "admitted": None if admitted is None else json.dumps(sorted(admitted))}).fetchall()
         for link, client in rows:
             with self.db:
                 sent = self.db.execute("INSERT OR IGNORE INTO coach_notices VALUES (?,?,'pending')", (link, today))

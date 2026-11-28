@@ -109,7 +109,8 @@ class ReportJournal:
             CREATE TABLE IF NOT EXISTS report_previews (
                 token TEXT PRIMARY KEY, chat INTEGER NOT NULL, author INTEGER NOT NULL,
                 day TEXT NOT NULL, issued INTEGER NOT NULL, text TEXT NOT NULL,
-                meets_minimum INTEGER NOT NULL, correction INTEGER NOT NULL
+                meets_minimum INTEGER NOT NULL, correction INTEGER NOT NULL,
+                admission TEXT
             );
             CREATE TABLE IF NOT EXISTS report_publications (
                 chat INTEGER NOT NULL, message INTEGER NOT NULL, token TEXT NOT NULL UNIQUE,
@@ -117,6 +118,10 @@ class ReportJournal:
                 FOREIGN KEY (token) REFERENCES report_previews(token)
             );
         """)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(report_previews)")}
+        if "admission" not in columns:
+            with db:
+                db.execute("ALTER TABLE report_previews ADD COLUMN admission TEXT")
 
     def membership(self, chat, author, active, sent_at, update):
         with self.db:
@@ -135,7 +140,7 @@ class ReportJournal:
         ).fetchone()
         return row[0] if row else None
 
-    def prepare(self, chat, author, day, issued, report, *, correction=False):
+    def prepare(self, chat, author, day, issued, report, *, correction=False, admission=None):
         joined = self.joined(chat, author)
         today = dt.datetime.fromtimestamp(issued, MOSCOW).date()
         if (joined is None or joined > issued or day < dt.datetime.fromtimestamp(joined, MOSCOW).date()
@@ -147,9 +152,12 @@ class ReportJournal:
                 DELETE FROM report_previews WHERE issued < ?
                 AND token NOT IN (SELECT token FROM report_publications)
             """, (issued - 3 * 86400,))
-            self.db.execute("INSERT INTO report_previews VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            (token, chat, author, day.isoformat(), issued, report.text,
-                             report.meets_minimum, correction))
+            self.db.execute("""
+                INSERT INTO report_previews
+                (token,chat,author,day,issued,text,meets_minimum,correction,admission)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (token, chat, author, day.isoformat(), issued, report.text,
+                  report.meets_minimum, correction, admission))
         return token
 
     def has_report(self, chat, author, day):
@@ -159,19 +167,21 @@ class ReportJournal:
             WHERE preview.chat = ? AND preview.author = ? AND preview.day = ?
         """, (chat, author, day.isoformat())).fetchone() is not None
 
-    def confirm(self, token, published, bot_id):
+    def confirm(self, token, published, bot_id, *, admission=None):
         """Return accepted, duplicate or rejected for an actual Telegram group message."""
         if published.via_bot != bot_id:
             return "rejected"
         with self.db:
             result = self.db.execute("""
-                SELECT chat, author, day, issued, text, correction
+                SELECT chat, author, day, issued, text, correction, admission
                 FROM report_previews WHERE token = ?
             """, (token,)).fetchone()
             if not result:
                 return "rejected"
-            chat, author, day, issued, text, correction = result
+            chat, author, day, issued, text, correction, prepared_admission = result
             if (published.chat, published.author, published.text) != (chat, author, text):
+                return "rejected"
+            if prepared_admission != admission:
                 return "rejected"
             duplicate = self.db.execute(
                 "SELECT token FROM report_publications WHERE chat = ? AND message = ?",

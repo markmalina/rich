@@ -135,6 +135,37 @@ class CoachingTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT DISTINCT day FROM coach_notices").fetchall(),
                          [("2026-11-27",)])
 
+    def test_reminders_require_admission_of_client_and_tracker_in_closed_worker(self):
+        self.pair()
+        self.cmd(8, "/coach_reminder 1 20:00")
+        self.telegram.reset_mock()
+        self.app.send_due(self.now.replace(hour=21), admitted={7})
+        self.app.send_due(self.now.replace(hour=21), admitted={8})
+        self.telegram.message.assert_not_called()
+        self.app.send_due(self.now.replace(hour=21), admitted={7, 8})
+        self.telegram.message.assert_called_once()
+        self.assertEqual(self.telegram.message.call_args.args[0], 8)
+
+    def test_revoked_counterparty_cannot_receive_new_shared_data(self):
+        admitted = {7, 8}
+        self.app = Coaching(self.db, self.telegram, 7, admitted=lambda user: user in admitted)
+        link = self.pair()
+        admitted.remove(7)
+        self.assertIn("приостановлена", self.cmd(8, f"/coach_report {link} | 12"))
+        self.assertIn("Подтверждённой отметки нет", self.cmd(8, f"/coach_view {link}"))
+        self.assertIn("отозван", self.cmd(8, f"/coach_end {link}"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_marks").fetchone(), (0,))
+
+    def test_invitation_stops_while_tracker_is_outside_the_closed_cohort(self):
+        admitted = {7, 8}
+        self.app = Coaching(self.db, self.telegram, 7, admitted=lambda user: user in admitted)
+        code = self.cmd(7, "/coach_invite demo").split()[-1]
+        admitted.remove(7)
+        self.assertIn("вне закрытого потока", self.cmd(8, f"/coach_join {code}"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_links").fetchone(), (0,))
+        admitted.add(7)
+        self.assertIn("Учебная связь", self.cmd(8, f"/coach_join {code}"))
+
     def test_reporting_without_minimum_counts_an_honest_no_and_uses_actual_share_time(self):
         link = self.pair(criterion="отчёт")
         before = self.now.replace(hour=23, minute=59, second=59)

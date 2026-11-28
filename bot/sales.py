@@ -132,6 +132,8 @@ class Sales(Pilot):
                                       (int(words[0] == "on"), i))
             if not updated.rowcount:
                 raise Clarification("Учебный доступ по этому заказу отсутствует.")
+            if words[0] == "on":
+                self.db.execute("DELETE FROM school_share_previews WHERE order_id=?", (i,))
             return "Решение о доступе сохранено отдельно от возврата."
         if command == "/pilot_assign" and len(words)==1 and (valid_id(words[0]) or words[0]=="off"):
             self.db.execute("DELETE FROM pilot_couriers WHERE order_id=?",(i,))

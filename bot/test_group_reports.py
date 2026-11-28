@@ -73,6 +73,29 @@ class ReportJournalTest(unittest.TestCase):
         self.assertEqual(self.journal.confirm(token, replace(sent, message=81), 7), "rejected")
         self.assertFalse(self.journal.missed(-100, 1, DAY, stamp(DAY + dt.timedelta(days=1), 0)))
 
+    def test_preview_is_bound_to_the_admission_version(self):
+        report = Report("Отчёт за 25.11.2026", True)
+        token = self.journal.prepare(-100, 1, DAY, self.issued, report, admission="v1")
+        sent = Publication(-100, 1, 80, self.issued + 1, 7, report.text)
+        self.assertEqual(self.journal.confirm(token, sent, 7, admission="v2"), "rejected")
+        self.assertEqual(self.journal.confirm(token, sent, 7, admission="v1"), "accepted")
+
+    def test_existing_preview_table_gains_nullable_admission_without_losing_rows(self):
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        db.execute("""
+            CREATE TABLE report_previews (
+                token TEXT PRIMARY KEY, chat INTEGER NOT NULL, author INTEGER NOT NULL,
+                day TEXT NOT NULL, issued INTEGER NOT NULL, text TEXT NOT NULL,
+                meets_minimum INTEGER NOT NULL, correction INTEGER NOT NULL
+            )
+        """)
+        db.execute("INSERT INTO report_previews VALUES ('old',-100,1,'2026-11-25',1,'old',1,0)")
+        ReportJournal(db)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(report_previews)")}
+        self.assertIn("admission", columns)
+        self.assertEqual(db.execute("SELECT token,admission FROM report_previews").fetchall(), [("old", None)])
+
     def test_late_review_never_changes_missed_day_and_history_respects_join(self):
         first = Report("Сегодня не приседал", False)
         original = self.journal.prepare(-100, 1, DAY, self.issued, first)
@@ -149,4 +172,46 @@ class TelegramReportsTest(unittest.TestCase):
         replies = [call for call in telegram.api.call_args_list if call.args[0] == "sendMessage"
                    and "reply_parameters" in call.args[1]]
         self.assertEqual(len(replies), 1)
+        self.assertEqual(len(rx.journal.history(-100, 1)), 1)
+
+    def test_revocation_and_terms_change_reject_an_old_group_preview(self):
+        group = {"chat": -100, "name": "Закрытая группа", "tracker": 1, "members": {"1": {"practices": [
+            {"action": "Приседание", "label": "Приседания", "unit": "повт."},
+        ]}}}
+        telegram, sheet = Mock(), Mock()
+        sheet.read.return_value = [row("Приседание", 10, "повт.", "1", "")]
+        telegram.api.return_value = {"status": "member"}
+        versions = {1: "v1"}
+        db = sqlite3.connect(":memory:")
+        self.addCleanup(db.close)
+        rx = GroupTelegram(telegram, {"id": 9, "username": "TestRX"}, db,
+                           configured_groups([group]), lambda user: sheet,
+                           admission=versions.get)
+        now = stamp(DAY)
+        rx.handle({"update_id": 8, "chat_member": {
+            "chat": {"id": -100}, "date": now,
+            "new_chat_member": {"user": {"id": 1}, "status": "member"},
+        }})
+        query = {"id": "old", "chat_type": "supergroup", "from": {"id": 1},
+                 "query": "отчёт -100 сегодня"}
+        with patch("bot.group_telegram.time.time", return_value=now + 1):
+            rx.handle({"inline_query": query})
+        old_text = telegram.api.call_args.args[1]["results"][0]["input_message_content"]["message_text"]
+        published = {"chat": {"id": -100, "type": "supergroup"}, "message_id": 42, "date": now + 2,
+                     "from": {"id": 1}, "via_bot": {"id": 9}, "text": old_text}
+
+        versions.clear()
+        rx.handle({"message": published})
+        self.assertEqual(telegram.api.call_args.args, ("deleteMessage", {"chat_id": -100, "message_id": 42}))
+        self.assertEqual(rx.journal.history(-100, 1), [])
+
+        versions[1] = "v2"
+        rx.handle({"message": {**published, "message_id": 43}})
+        self.assertEqual(telegram.api.call_args.args, ("deleteMessage", {"chat_id": -100, "message_id": 43}))
+        self.assertEqual(rx.journal.history(-100, 1), [])
+
+        with patch("bot.group_telegram.time.time", return_value=now + 3):
+            rx.handle({"inline_query": {**query, "id": "new"}})
+        new_text = telegram.api.call_args.args[1]["results"][0]["input_message_content"]["message_text"]
+        rx.handle({"message": {**published, "message_id": 44, "date": now + 4, "text": new_text}})
         self.assertEqual(len(rx.journal.history(-100, 1)), 1)

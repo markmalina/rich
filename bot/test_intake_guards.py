@@ -158,6 +158,23 @@ class IntakeTest(unittest.TestCase):
         self.assertFalse((self.root / "tg-7-3.ogg").exists())
         self.assertEqual(self.model.transcribe.call_count, 1)
 
+    def test_revoked_profile_cannot_start_provisioning_or_replay_queued_message(self):
+        orphan = {"chat": {"id": 8, "type": "private"}, "from": {"id": 8},
+                  "message_id": 12, "date": int(NOW.timestamp()), "voice": {"file_id": "fixture"}}
+        self.bot.admitted = frozenset({7})
+        self.bot.provisioner = Mock()
+        self.bot.inbox_writes.defer(10, 8, orphan, NOW)
+        update = {"update_id": 12, "message": orphan}
+        self.bot.receive([update])
+        self.bot.process_update(update)
+        self.bot.reconcile_inbox(20)
+        self.bot.provisioner.provision.assert_not_called()
+        self.tg.media.assert_not_called()
+        self.model.transcribe.assert_not_called()
+        self.assertEqual(self.google.inbox, [])
+        self.assertFalse((self.root / "participants").exists())
+        self.assertTrue(self.bot.inbox_writes.waiting(8))
+
     def test_unbound_profile_media_gets_private_status_without_downloading_or_writing(self):
         update = {"update_id": 12, "message": {"chat": {"id": 8, "type": "private"}, "from": {"id": 8},
                                                "message_id": 1, "date": int(NOW.timestamp()), "voice": {"file_id": "v"}}}

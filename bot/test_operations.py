@@ -2,18 +2,23 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import datetime as dt
 import json
 from pathlib import Path
 from queue import Queue
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from .coaching import Coaching
 from .ledger import MOSCOW
-from .operations import Operations, apply_privacy, copy_database
+from .main import Bot
+from .operations import (Operations, apply_privacy, copy_database, poll_status, restore_database,
+                         verify_snapshot_manifest, write_snapshot_manifest)
 from .providers import ProviderError
 from .sales import Sales
 
@@ -59,6 +64,10 @@ class OperationsTest(unittest.TestCase):
         self.assertIn("2026-11-26",self.ops.health())
         source=self.ops.snapshot(self.now.date())
         self.assertEqual(source.stat().st_mode & 0o777,0o600)
+        bundle_ledger=self.ops.storage/"rx-2026-11-26-erasures.sqlite"
+        bundle_manifest=self.ops.storage/"rx-2026-11-26.manifest.json"
+        evidence=verify_snapshot_manifest(source,bundle_ledger,bundle_manifest)
+        self.assertEqual(evidence["format"],"rich-recovery-bundle-v1")
         self.assertIn("нет",self.call(7,"/pilot_purge_school 8"))
         self.call(8,"/pilot_privacy school")
         self.assertIn("права",self.call(9,"/pilot_purge_school 8"))
@@ -80,6 +89,114 @@ class OperationsTest(unittest.TestCase):
         with self.db:
             apply_privacy(self.db,self.ops.ledger)
         self.assertIsNone(self.db.execute("SELECT resolved FROM privacy_requests WHERE user=8").fetchone()[0])
+
+    def test_manifest_rejects_changed_database_or_deletion_ledger(self):
+        source=self.ops.snapshot(self.now.date())
+        ledger=self.ops.storage/"rx-2026-11-26-erasures.sqlite"
+        manifest=self.ops.storage/"rx-2026-11-26.manifest.json"
+        verify_snapshot_manifest(source,ledger,manifest)
+
+        changed=self.root/"changed.sqlite"
+        changed.write_bytes(source.read_bytes()+b"changed")
+        with self.assertRaisesRegex(RuntimeError,"database"):
+            verify_snapshot_manifest(changed,ledger,manifest)
+
+        source.write_bytes(source.read_bytes()+b"changed")
+        with self.assertRaisesRegex(RuntimeError,"database"):
+            self.ops.snapshot(self.now.date())
+        self.assertIn("повреждён",self.ops.health())
+
+        rebuilt=self.root/"rebuilt.manifest.json"
+        write_snapshot_manifest(changed,ledger,rebuilt,created=self.now)
+        self.assertEqual(verify_snapshot_manifest(changed,ledger,rebuilt)["created"],self.now.isoformat())
+
+    def test_manifested_bundle_restores_under_new_names_and_fails_closed(self):
+        order=self.enrol(8,"manifested")
+        self.call(8,f"/school_work {order} 1 | restorable")
+        source=self.ops.snapshot(self.now.date())
+        bundled_ledger=self.ops.storage/"rx-2026-11-26-erasures.sqlite"
+        manifest=self.ops.storage/"rx-2026-11-26.manifest.json"
+        external_source=self.root/"external-main.sqlite"
+        external_ledger=self.root/"external-erasures.sqlite"
+        external_source.write_bytes(source.read_bytes())
+        external_ledger.write_bytes(bundled_ledger.read_bytes())
+
+        restored=self.root/"restored-from-bundle.sqlite"
+        restore_database(external_source,restored,external_ledger,manifest)
+        check=sqlite3.connect(restored)
+        self.addCleanup(check.close)
+        self.assertEqual(check.execute("SELECT text FROM school_work").fetchone(),("restorable",))
+
+        external_source.write_bytes(external_source.read_bytes()+b"tampered")
+        rejected=self.root/"must-not-exist.sqlite"
+        with self.assertRaisesRegex(RuntimeError,"database"):
+            restore_database(external_source,rejected,external_ledger,manifest)
+        self.assertFalse(rejected.exists())
+
+    def test_closed_pilot_restore_preserves_refund_and_queue_without_reviving_access(self):
+        terms = "Учебные условия восстановления"
+        source_root = self.root / "source"
+        source_root.mkdir()
+        destination_root = self.root / "target"
+        destination_root.mkdir()
+        bot = Bot(self.tg, None, None, source_root, 7, admitted={8}, terms=terms)
+        with closing(bot.db):
+            bot.pilot_orders = Sales(bot.db, self.tg, 7)
+            ops = Operations(bot.db, self.tg, 7, source_root)
+            self.addCleanup(ops.ledger.close)
+            now = self.now
+
+            def private(app, number, user, text, time):
+                item = {"from": {"id": user}, "chat": {"type": "private", "id": user}, "text": text}
+                with app.db:
+                    app.db.execute("INSERT INTO receipts VALUES (?,?)", (number, time.isoformat()))
+                app.process_update({"message": item, "update_id": number})
+
+            old_token = f"/pilot_consent {bot.terms_version}"
+            private(bot, 1, 8, old_token, now)
+            private(bot, 2, 7, "/pilot_offer 8 demo | fixture", now)
+            private(bot, 3, 7, "/pilot_paid 1 9900 | freeze-receipt", now)
+            private(bot, 4, 8, "/school_work 1 1 | private fixture", now)
+            private(bot, 5, 8, "/pilot_refund_request 1", now)
+            private(bot, 6, 7, "/pilot_refund 1 100 | freeze-refund", now)
+            bot.inbox_writes.defer(7, 8, {"text": "pending fixture", "from": {"id": 8},
+                                        "chat": {"type": "private", "id": 8}}, now, onboarding=True)
+            bundle = ops.snapshot(now.date())
+            bundled_ledger = ops.storage / f"rx-{now.date()}-erasures.sqlite"
+            manifest = ops.storage / f"rx-{now.date()}.manifest.json"
+
+            bot.operations = ops
+            later = now + dt.timedelta(minutes=1)
+            private(bot, 8, 8, "/pilot_withdraw", later)
+            self.assertFalse(bot.has_private_access(8))
+            private(bot, 9, 8, "/pilot_privacy school", later)
+            self.assertIn("Запрос получен", self.tg.message.call_args.args[1])
+            private(bot, 10, 7, "/pilot_purge_school 8", later)
+            self.assertIn("обработаны", self.tg.message.call_args.args[1])
+            latest = self.root / "latest-erasures.sqlite"
+            copy_database(ops.ledger, latest)
+
+            restore_database(bundle, destination_root / "bot.sqlite", bundled_ledger, manifest,
+                             current_ledger_path=latest)
+
+        restored = Bot(self.tg, None, None, destination_root, 7, provisioner=Mock(),
+                       admitted={8}, terms=terms)
+        self.addCleanup(restored.db.close)
+        restored.pilot_orders = Sales(restored.db, self.tg, 7)
+        self.assertFalse(restored.has_private_access(8))
+        private(restored, 11, 8, old_token, later)
+        self.assertFalse(restored.has_private_access(8))
+        restored.reconcile_inbox(12)
+        restored.provisioner.provision.assert_not_called()
+        self.assertTrue(restored.inbox_writes.waiting(8))
+        self.assertTrue(restored.inbox_writes.needs_onboarding(7))
+        self.assertEqual(restored.db.execute("SELECT COUNT(*) FROM school_work").fetchone(), (0,))
+        self.assertEqual(restored.db.execute("SELECT suspended FROM school_enrolments").fetchone(), (1,))
+        private(restored, 12, 7, "/pilot_refund 1 100 | freeze-refund", later)
+        self.assertIn("уже подтверждён", self.tg.message.call_args.args[1])
+        self.assertEqual(restored.db.execute("SELECT amount FROM pilot_refunds").fetchall(), [(10000,)])
+        self.assertEqual(restored.db.execute("SELECT units FROM pilot_kits").fetchall(), [(21,)])
+        self.assertEqual(restored.db.execute("PRAGMA integrity_check").fetchone(), ("ok",))
 
     def test_failed_restore_never_publishes_private_data_and_can_be_retried(self):
         order=self.enrol(8,"fixture")
@@ -135,6 +252,56 @@ class OperationsTest(unittest.TestCase):
             restarted.check_alerts(self.now+dt.timedelta(minutes=2))
             self.assertEqual(self.tg.message.call_count,2)
 
+    def test_worker_heartbeat_advances_only_after_successful_telegram_poll(self):
+        bot = Bot(self.tg, None, None, self.root, 7)
+        self.addCleanup(bot.db.close)
+        bot.operations = Operations(bot.db, self.tg, 7, self.root)
+        self.addCleanup(bot.operations.ledger.close)
+        self.tg.api.side_effect = [[], ProviderError("Telegram", 503)]
+        with (patch.object(bot.operations, "confirm_poll", wraps=bot.operations.confirm_poll) as confirm,
+              patch.object(bot.operations, "run_daily"),
+              patch("bot.main.time.sleep", side_effect=KeyboardInterrupt),
+              self.assertRaises(KeyboardInterrupt)):
+            bot.run()
+        self.assertEqual(self.tg.api.call_count, 2)
+        confirm.assert_called_once()
+        confirmed_at = confirm.call_args.args[0]
+        self.assertEqual(poll_status(self.root / "bot.sqlite", confirmed_at, 120), "poll_ok")
+        self.assertEqual(poll_status(self.root / "bot.sqlite", confirmed_at + dt.timedelta(minutes=3), 120),
+                         "poll_stale")
+
+    def test_poll_heartbeat_is_observable_in_another_process_and_cleared_on_restore(self):
+        database = self.root / "main.sqlite"
+        now = dt.datetime.now(MOSCOW).replace(microsecond=0)
+
+        def inspect():
+            return subprocess.run(
+                [sys.executable, "-m", "bot.operations", "check-poll", str(database), "--max-age", "120"],
+                capture_output=True, text=True, check=False,
+            )
+
+        before = inspect()
+        self.assertEqual((before.returncode, before.stdout.strip()), (1, "poll_waiting"))
+        self.ops.confirm_poll(now)
+        fresh = inspect()
+        self.assertEqual((fresh.returncode, fresh.stdout.strip()), (0, "poll_ok"))
+        self.assertEqual(poll_status(database, now + dt.timedelta(seconds=120), 120), "poll_ok")
+        self.assertEqual(poll_status(database, now + dt.timedelta(seconds=121), 120), "poll_stale")
+        self.ops.confirm_poll(now - dt.timedelta(minutes=3))
+        stopped = inspect()
+        self.assertEqual((stopped.returncode, stopped.stdout.strip()), (1, "poll_stale"))
+        self.assertEqual(stopped.stderr, "")
+        missing = self.root / "absent.sqlite"
+        self.assertEqual(poll_status(missing, now, 120), "poll_unavailable")
+        self.assertFalse(missing.exists())
+
+        bundle = self.ops.snapshot(now.date())
+        restored = self.root / "recovered.sqlite"
+        journal = self.ops.storage / f"rx-{now.date()}-erasures.sqlite"
+        manifest = self.ops.storage / f"rx-{now.date()}.manifest.json"
+        restore_database(bundle, restored, journal, manifest)
+        self.assertEqual(poll_status(restored, now, 120), "poll_waiting")
+
     def test_network_counts_unique_payors_and_hides_demo(self):
         Coaching(self.db,self.tg,7)
         with self.db:
@@ -186,7 +353,10 @@ class OperationsTest(unittest.TestCase):
         command(9,"/coach_report 1 | да")
         command(9,"/coach_share 1")
         self.assertIn("сохранено",command(8,f"/coach_paid 1 {self.now.date()} | day-receipt"))
-        self.assertIn("Реальных клиентов: 1. Подтверждено оплаченных дней: 1",self.call(8,f"/school_status {order}"))
+        status = self.call(8, f"/school_status {order}")
+        self.assertIn("Подтверждённая практика: 1", status)
+        self.assertIn("Фактически платящих клиентов: 1", status)
+        self.assertIn("Оплаченных дней: 1", status)
         for action in ("reserve","ship","deliver"):
             self.call(7,f"/pilot_stock {order} {action} 21 | kit-{action}")
         self.assertIn("вручено 21",self.call(8,f"/pilot_delivery {order}"))

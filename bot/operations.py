@@ -4,7 +4,9 @@
 """Local recovery and privacy operations for the pilot, separate from Google journals."""
 
 import argparse
+from contextlib import closing, nullcontext
 import datetime as dt
+import hashlib
 import io
 import json
 import logging
@@ -12,7 +14,9 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import tempfile
+from uuid import uuid4
 
 from .coaching import day_arg, valid_id
 from .ledger import Clarification, MOSCOW
@@ -22,13 +26,30 @@ TABLES = {"pilot_orders", "school_enrolments", "pilot_kits", "pilot_stock", "pil
           "coach_links", "coach_payments", "deferred_inbox", "event_writes", "privacy_requests"}
 ALERT_INTERVAL = dt.timedelta(minutes=1)
 WARNING_QUEUE_SECONDS = 15 * 60
+SNAPSHOT_FORMAT = "rich-recovery-bundle-v1"
+CONSENT_EPOCH = "private_consent_epoch"
 
 
 def table_exists(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
 
-def copy_database(source, destination, *, overwrite=False, deletion_ledger=None):
+def poll_status(path, now, max_age):
+    """Read the worker heartbeat without starting another Telegram poller."""
+    try:
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            row = db.execute("SELECT last_success FROM operational_poll WHERE id=1").fetchone()
+    except (OSError, sqlite3.Error):
+        return "poll_unavailable"
+    if row is None:
+        return "poll_waiting"
+    if type(row[0]) is not int:
+        return "poll_unavailable"
+    age = int(now.timestamp()) - row[0]
+    return "poll_ok" if 0 <= age <= max_age else "poll_stale"
+
+
+def copy_database(source, destination, *, overwrite=False, deletion_ledger=None, prepare=None):
     destination=Path(destination)
     if not overwrite and destination.exists():
         raise FileExistsError("destination already exists")
@@ -39,9 +60,11 @@ def copy_database(source, destination, *, overwrite=False, deletion_ledger=None)
         target=sqlite3.connect(tmp)
         try:
             source.backup(target)
-            if deletion_ledger is not None:
-                with target:
+            with target:
+                if deletion_ledger is not None:
                     apply_privacy(target,deletion_ledger)
+                if prepare is not None:
+                    prepare(target)
             if target.execute("PRAGMA quick_check").fetchone()!=("ok",):
                 raise RuntimeError("SQLite verification failed")
         finally:
@@ -61,6 +84,89 @@ def copy_database(source, destination, *, overwrite=False, deletion_ledger=None)
         Path(tmp).unlink(missing_ok=True)
 
 
+def snapshot_evidence(path):
+    path = Path(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+            raise RuntimeError("SQLite verification failed")
+        schema = "\n".join(row[0] or "" for row in db.execute(
+            "SELECT sql FROM sqlite_master ORDER BY type,name"
+        ))
+    finally:
+        db.close()
+    return {"file": path.name, "bytes": path.stat().st_size, "sha256": digest.hexdigest(),
+            "schema_sha256": hashlib.sha256(schema.encode()).hexdigest()}
+
+
+def write_snapshot_manifest(database, deletion_ledger, manifest, *, created=None):
+    manifest = Path(manifest)
+    manifest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    record = {"format": SNAPSHOT_FORMAT,
+              "created": (created or dt.datetime.now(MOSCOW)).isoformat(),
+              "database": snapshot_evidence(database),
+              "deletion_ledger": snapshot_evidence(deletion_ledger)}
+    fd, tmp = tempfile.mkstemp(dir=manifest.parent, prefix=".manifest-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, manifest)
+        directory = os.open(manifest.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    return record
+
+
+def verify_snapshot_manifest(database, deletion_ledger, manifest):
+    try:
+        record = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("snapshot manifest is unreadable") from exc
+    if record.get("format") != SNAPSHOT_FORMAT:
+        raise RuntimeError("snapshot manifest format is unsupported")
+    for field, path in (("database", database), ("deletion_ledger", deletion_ledger)):
+        expected = record.get(field)
+        actual = snapshot_evidence(path)
+        evidence = ("bytes", "sha256", "schema_sha256")
+        if not isinstance(expected, dict) or any(expected.get(key) != actual[key] for key in evidence):
+            raise RuntimeError(f"snapshot manifest mismatch: {field}")
+    return record
+
+
+def restore_database(source_path, destination, deletion_ledger_path, manifest, *, current_ledger_path=None):
+    verify_snapshot_manifest(source_path, deletion_ledger_path, manifest)
+    if current_ledger_path is not None:
+        snapshot_evidence(current_ledger_path)
+
+    def read_database(path):
+        return closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True))
+
+    current_context = read_database(current_ledger_path) if current_ledger_path is not None else nullcontext()
+    with current_context as current, read_database(source_path) as source, read_database(deletion_ledger_path) as bundled:
+        def prepare(target):
+            if table_exists(target, "operational_poll"):
+                target.execute("DELETE FROM operational_poll")
+            if current is not None:
+                current.execute("SELECT user, recorded FROM erasures LIMIT 0")
+                apply_privacy(target, current)
+            if table_exists(target, "private_consents"):
+                target.execute("UPDATE private_consents SET version=NULL")
+                target.execute("INSERT OR REPLACE INTO state(key, value) VALUES (?, ?)",
+                               (CONSENT_EPOCH, json.dumps(uuid4().hex)))
+
+        copy_database(source, destination, deletion_ledger=bundled, prepare=prepare)
+
+
 def apply_privacy(db, ledger):
     if not table_exists(db,"school_work"):
         return
@@ -69,6 +175,8 @@ def apply_privacy(db, ledger):
         db.execute(f"UPDATE school_enrolments SET suspended=1 WHERE order_id IN ({orders})",(user,day))
         db.execute(f"DELETE FROM school_work WHERE order_id IN ({orders})",(user,day))
         db.execute(f"DELETE FROM school_comments WHERE order_id IN ({orders})",(user,day))
+        if table_exists(db, "school_share_previews"):
+            db.execute(f"DELETE FROM school_share_previews WHERE order_id IN ({orders})", (user, day))
         if table_exists(db,"school_activity"):
             db.execute(f"DELETE FROM school_activity WHERE order_id IN ({orders})",(user,day))
         if table_exists(db,"privacy_requests"):
@@ -100,6 +208,11 @@ class Operations:
                 )
             """)
             self.db.execute("CREATE TABLE IF NOT EXISTS operational_incidents(code TEXT PRIMARY KEY)")
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS operational_poll (
+                    id INTEGER PRIMARY KEY CHECK(id=1), last_success INTEGER NOT NULL
+                )
+            """)
         fd=os.open(self.ledger_path,os.O_WRONLY|os.O_CREAT,0o600)
         os.close(fd)
         self.ledger=sqlite3.connect(self.ledger_path)
@@ -110,8 +223,14 @@ class Operations:
 
     def snapshot(self, today, *, replace=False):
         filename=self.storage/f"rx-{today}.sqlite"
-        if not filename.exists() or replace:
-            copy_database(self.db,filename,overwrite=replace)
+        ledger=self.storage/f"rx-{today}-erasures.sqlite"
+        manifest=self.storage/f"rx-{today}.manifest.json"
+        if not filename.exists() or not ledger.exists() or not manifest.exists() or replace:
+            copy_database(self.db,filename,overwrite=filename.exists())
+            copy_database(self.ledger,ledger,overwrite=ledger.exists())
+            write_snapshot_manifest(filename,ledger,manifest)
+        else:
+            verify_snapshot_manifest(filename,ledger,manifest)
         return filename
 
     def run_daily(self,now):
@@ -197,6 +316,18 @@ class Operations:
         """,(self.owner,day)).fetchone()
         return f"{day} МСК. Уникальных платящих {people}. Оплаченных назначений {links}. У владельца {owner}."
 
+    def confirm_poll(self, now):
+        self.last_poll = now
+        try:
+            with self.db:
+                self.db.execute("""
+                    INSERT INTO operational_poll VALUES (1,?)
+                    ON CONFLICT(id) DO UPDATE SET last_success=excluded.last_success
+                    WHERE operational_poll.last_success<>excluded.last_success
+                """, (int(now.timestamp()),))
+        except sqlite3.Error as error:
+            logging.warning("Пульс опроса RX: %s", type(error).__name__)
+
     def oldest_queue(self, now):
         stamps = [self.db.execute(f"SELECT MIN(queued_at) FROM {table}").fetchone()[0]
                   for table in ("deferred_inbox", "event_writes") if table_exists(self.db, table)]
@@ -232,8 +363,18 @@ class Operations:
         info=f"Свободно на томе {disk.free//(1024*1024)} МиБ."
         if disk.free<max(32*1024*1024,disk.total//20):
             info+=" Мало места."
-        backups=list(self.storage.glob("rx-*.sqlite"))
-        latest=max((p.stem.removeprefix("rx-") for p in backups),default="ещё нет")
+        backups=list(self.storage.glob("rx-????-??-??.sqlite"))
+        latest_path=max(backups,default=None)
+        latest=latest_path.stem.removeprefix("rx-") if latest_path else "ещё нет"
+        bundle=""
+        if latest_path:
+            ledger=self.storage/f"rx-{latest}-erasures.sqlite"
+            manifest=self.storage/f"rx-{latest}.manifest.json"
+            try:
+                verify_snapshot_manifest(latest_path,ledger,manifest)
+                bundle=" · комплект проверен"
+            except (OSError,RuntimeError):
+                bundle=" · комплект повреждён или неполон"
         age=self.oldest_queue(now)
         oldest=f" Самая старая: {age//60} мин." if age is not None else ""
         last_poll = self.last_poll.astimezone(MOSCOW).strftime("%d.%m %H:%M") if self.last_poll else "ожидается"
@@ -241,7 +382,7 @@ class Operations:
         if self.ai_quota is not None and not self.ai_disabled:
             used,limit=self.ai_quota.status(now)
             ai=f"обращения {used} из {limit} за день МСК"
-        return (f"Копия SQLite: {latest}. {info}\n"
+        return (f"Копия SQLite: {latest}{bundle}. {info}\n"
                 f"Опрос Telegram: {last_poll}. ИИ: {ai}.\n"
                 f"Очередь личных записей: {counts.get('event_writes',0)}. "
                 f"Ожидают во «Входящих»: {counts.get('deferred_inbox',0)}.{oldest} "
@@ -278,21 +419,36 @@ class Operations:
         return record
 
 
+def check_poll(argv):
+    parser = argparse.ArgumentParser(description="Read the eRex polling heartbeat.")
+    parser.add_argument("database", type=Path)
+    parser.add_argument("--max-age", type=int, default=120)
+    args = parser.parse_args(argv)
+    if args.max_age <= 0:
+        parser.error("--max-age must be positive")
+    result = poll_status(args.database, dt.datetime.now(MOSCOW), args.max_age)
+    print(result)
+    return int(result != "poll_ok")
+
+
 def main():
+    if sys.argv[1:2] == ["check-poll"]:
+        raise SystemExit(check_poll(sys.argv[2:]))
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source",type=Path)
     parser.add_argument("destination",type=Path)
     parser.add_argument("--deletion-ledger",type=Path,required=True)
+    parser.add_argument("--manifest",type=Path,required=True)
+    parser.add_argument("--current-deletion-ledger",type=Path,
+                        help="fresh verified copy of the deletion journal, in addition to the bundled copy")
     args=parser.parse_args()
-    if not args.source.is_file() or not args.deletion_ledger.is_file():
-        parser.error("source and deletion ledger must exist")
-    source=sqlite3.connect(args.source.resolve().as_uri()+"?mode=ro",uri=True)
-    ledger=sqlite3.connect(args.deletion_ledger.resolve().as_uri()+"?mode=ro",uri=True)
+    if not args.source.is_file() or not args.deletion_ledger.is_file() or not args.manifest.is_file():
+        parser.error("source, deletion ledger and manifest must exist")
     try:
-        copy_database(source,args.destination,deletion_ledger=ledger)
-    finally:
-        source.close()
-        ledger.close()
+        restore_database(args.source,args.destination,args.deletion_ledger,args.manifest,
+                         current_ledger_path=args.current_deletion_ledger)
+    except (OSError, sqlite3.Error, RuntimeError) as exc:
+        parser.error(str(exc))
     print("SQLite: копия восстановлена, журнал удалений применён.")
 
 

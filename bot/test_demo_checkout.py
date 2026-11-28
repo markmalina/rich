@@ -10,8 +10,10 @@ from unittest.mock import Mock
 from .coaching import Coaching
 from .demo_checkout import DemoCheckout
 from .ledger import MOSCOW
-from .main import Bot
-from .operations import Operations
+from .main import ADMISSION_REQUIRED, ADMISSION_SETTING, Bot, private_admission
+from .operations import Operations, restore_database
+from .pilot_check import local_database
+from .providers import ProviderError
 from .sales import Sales
 
 
@@ -19,15 +21,21 @@ class DemoCheckoutTest(unittest.TestCase):
     def setUp(self):
         root = TemporaryDirectory()
         self.addCleanup(root.cleanup)
+        self.root = Path(root.name)
         self.tg = Mock()
-        self.bot = Bot(self.tg, None, None, Path(root.name), 7)
-        self.db = self.bot.db
-        self.addCleanup(self.db.close)
-        self.bot.pilot_orders = Sales(self.db, self.tg, 7)
-        self.bot.coaching = Coaching(self.db, self.tg, 7, demo_only=True)
-        self.bot.demo_checkout = DemoCheckout(self.db, self.tg, self.bot.pilot_orders, self.bot.coaching)
         self.update = 0
         self.now = dt.datetime(2026, 11, 27, 20, 0, tzinfo=MOSCOW)
+        self.attach_worker(self.root)
+
+    def attach_worker(self, path, *, admitted=None, terms=None, cohort=None):
+        self.bot = Bot(self.tg, None, None, path, 7, admitted=admitted, terms=terms)
+        self.db = self.bot.db
+        self.addCleanup(self.db.close)
+        self.bot.pilot_orders = Sales(self.db, self.tg, 7, access_scope=self.bot.school_access_scope)
+        self.bot.coaching = Coaching(self.db, self.tg, 7, demo_only=True,
+                                     admitted=self.bot.has_private_access)
+        self.bot.demo_checkout = DemoCheckout(self.db, self.tg, self.bot.pilot_orders, self.bot.coaching,
+                                              school_cohort=cohort, consent_version=self.bot.terms_version)
 
     def update_bot(self, **payload):
         self.update += 1
@@ -53,6 +61,50 @@ class DemoCheckoutTest(unittest.TestCase):
                     if row[0]["text"] == text)
         self.callback(user, data)
         return data
+
+    def test_closed_intake_blocks_qr_and_previous_checkout_button(self):
+        self.bot.admitted = frozenset({7, 8})
+        self.message(8, "/start tracking_GR020010")
+        button = self.click_label(8, "Оплатить")
+        self.assertTrue(button.startswith("dp:"))
+        confirm = self.screen()["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+        self.bot.admitted = frozenset({7})
+        self.callback(8, confirm)
+        self.assertIn(ADMISSION_REQUIRED, self.tg.api.call_args.args[1]["text"])
+        self.message(9, "/start tracking_GR020011")
+        self.assertEqual(self.tg.message.call_args.args, (9, ADMISSION_REQUIRED))
+        self.assertEqual(self.db.execute("SELECT buyer,state FROM pilot_orders").fetchall(), [(8, "awaiting")])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(), (0,))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_kits").fetchone(), (0,))
+
+    def test_revoked_tracker_hides_and_rejects_previous_day_button(self):
+        self.bot.admitted = frozenset({7, 8, 9})
+        self.message(7, "/coach_allow 9")
+        self.message(9, "/coach_invite demo")
+        code = self.tg.message.call_args.args[1].split()[-1]
+        self.message(8, f"/coach_join {code}")
+        self.message(8, "/coach_plan 1 | движение | отчёт | пн,вт,ср,чт,пт,сб,вс | 5 мин | 20:00–21:00")
+        self.message(8, "/coach_share_plan 1")
+        self.message(9, "/coach_accept 1")
+        self.message(8, "/pay")
+        stale = next(row[0]["callback_data"] for row in self.screen()["reply_markup"]["inline_keyboard"]
+                     if "Оплатить день" in row[0]["text"])
+
+        self.bot.admitted = frozenset({7, 8})
+        self.message(8, "/pay")
+        self.assertFalse(any("Оплатить день" in row[0]["text"]
+                             for row in self.screen()["reply_markup"]["inline_keyboard"]))
+        self.callback(8, stale)
+        self.assertIn("нет", self.tg.api.call_args.args[1]["text"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (0,))
+
+    def test_closed_configuration_distinguishes_empty_and_invalid(self):
+        self.assertIsNone(private_admission({}))
+        self.assertEqual(private_admission({ADMISSION_SETTING: "[]"}), frozenset())
+        self.assertEqual(private_admission({ADMISSION_SETTING: "[8, 9, 8]"}), {8, 9})
+        for invalid in ("", "null", "8", "[true]", '["8"]', "[-1]", "[9223372036854775808]"):
+            with self.subTest(invalid=invalid), self.assertRaises(ProviderError):
+                private_admission({ADMISSION_SETTING: invalid})
 
     def test_printed_jar_to_tracking_and_private_practice(self):
         self.message(8, "/start tracking_GR020010")
@@ -127,6 +179,50 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertIn("Гранола: заявок 1, оплат 1", self.bot.pilot_orders.metrics(True, None))
         self.assertNotIn("оплат 1", self.bot.pilot_orders.metrics(False, None))
 
+    def test_first_seven_school_days_do_not_offer_a_separate_coaching_payment(self):
+        self.message(7, "/pilot_cohort_create first-2026 2026-11-27 demo")
+        self.bot.demo_checkout.school_cohort = "first-2026"
+        self.bot.demo_checkout.consent_version = "terms-v1"
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.click_label(8, "Оплатить")
+        self.click_label(8, "Я оплатил")
+
+        self.message(7, "/coach_invite demo")
+        code = self.tg.message.call_args.args[1].split()[-1]
+        self.message(8, f"/coach_join {code}")
+        self.message(8, "/coach_plan 1 | движение | отчёт | пн,вт,ср,чт,пт,сб,вс | 5 мин | 20:00–21:00")
+        self.message(8, "/coach_share_plan 1")
+        self.message(7, "/coach_accept 1")
+        self.message(8, "/pay")
+        self.assertFalse(any("Оплатить день" in row[0]["text"]
+                             for row in self.screen()["reply_markup"]["inline_keyboard"]))
+        self.callback(8, "dp:coachpay:1:20261127")
+        self.assertIn("нет", self.tg.api.call_args.args[1]["text"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (0,))
+
+        self.now += dt.timedelta(days=7)
+        self.message(8, "/pay")
+        self.assertTrue(any("Оплатить день" in row[0]["text"]
+                            for row in self.screen()["reply_markup"]["inline_keyboard"]))
+        self.assertEqual(self.db.execute("""
+            SELECT starts,ends,consent_version FROM school_included_coaching s
+            JOIN school_order_cohorts c ON c.order_id=s.order_id
+        """).fetchone(), ("2026-11-27", "2026-12-03", "terms-v1"))
+        with self.db:
+            self.db.execute("UPDATE school_enrolments SET suspended=1 WHERE order_id=1")
+        self.now -= dt.timedelta(days=7)
+        self.message(8, "/pay")
+        self.assertTrue(any("Оплатить день" in row[0]["text"]
+                            for row in self.screen()["reply_markup"]["inline_keyboard"]))
+
+    def test_missing_configured_cohort_does_not_leave_an_orphan_order(self):
+        self.bot.demo_checkout.school_cohort = "missing-cohort"
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.assertIn("не найден", self.tg.api.call_args.args[1]["text"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_orders").fetchone(), (0,))
+
     def test_paid_school_screen_tracks_access_after_refund(self):
         self.message(8, "/pay")
         self.click_label(8, "Школа и продвижение · 9 900 ₽")
@@ -134,6 +230,9 @@ class DemoCheckoutTest(unittest.TestCase):
         confirm = self.click_label(8, "Я оплатил")
         self.message(8, "/pilot_refund_request 1")
         self.message(7, "/pilot_refund 1 100 | partial")
+        self.message(8, "/school_share 1 1 | Тестовая работа")
+        preview = self.tg.message.call_args.args[1]
+        share = preview[preview.index("/school_confirm_share "):].rstrip(".")
         self.message(7, "/pilot_suspend 1 on")
 
         self.message(8, "/pay")
@@ -150,6 +249,9 @@ class DemoCheckoutTest(unittest.TestCase):
         self.message(7, "/pilot_suspend 1 off")
         self.callback(8, confirm)
         self.assertIn("/school_day 1", self.screen()["text"])
+        self.message(8, share)
+        self.assertIn("устарело", self.tg.message.call_args.args[1])
+        self.assertEqual(self.db.execute("SELECT shared FROM school_work").fetchall(), [(0,)])
         self.assertEqual(self.db.execute("SELECT amount FROM pilot_receipts").fetchall(), [(990000,)])
         self.assertEqual(self.db.execute("SELECT amount FROM pilot_refunds").fetchall(), [(10000,)])
         self.assertEqual(self.db.execute("SELECT units,grams FROM pilot_kits").fetchall(), [(21, 80)])
@@ -187,7 +289,51 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertRegex(rows[1][1], r"^demo-self:2:[0-9a-f]{32}$")
 
-    def test_private_referral_to_school_coaching_and_delivery_in_demo_mode(self):
+    def test_t36_t38_private_referral_four_demo_payments_and_delivery(self):
+        self.exercise_private_demo_journey()
+
+    def test_t36_t38_closed_cohort_journey_on_a_restored_volume(self):
+        source = self.root / "source"
+        source.mkdir()
+        restored = self.root / "restored"
+        opts = {"admitted": {8, 9}, "terms": "Условия тестового потока", "cohort": "restored-demo"}
+        self.attach_worker(source, **opts)
+        self.message(7, "/pilot_cohort_create restored-demo 2026-11-27 demo")
+        old_consent = f"/pilot_consent {self.bot.terms_version}"
+        for user in (8, 9):
+            self.message(user, old_consent)
+            self.assertTrue(self.bot.has_private_access(user))
+
+        ops = Operations(self.db, self.tg, 7, source)
+        self.addCleanup(ops.ledger.close)
+        ops.confirm_poll(self.now)
+        snapshot = ops.snapshot(self.now.date())
+        prefix = ops.storage / f"rx-{self.now.date()}"
+        database = restored / "bot.sqlite"
+        restore_database(snapshot, database, prefix.with_name(prefix.name + "-erasures.sqlite"),
+                         prefix.with_suffix(".manifest.json"), current_ledger_path=ops.ledger_path)
+        check = local_database(database, expect_restored=True, expected_cohort="restored-demo", now=self.now)
+        self.assertEqual((check["mode"], check["queue"], check["poll"]), ("demo-only", 0, "poll_waiting"))
+
+        self.attach_worker(restored, **opts)
+        self.assertFalse(self.bot.has_private_access(8))
+        self.message(8, old_consent)
+        self.message(8, "/start tracking_GR020010")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_orders").fetchone(), (0,))
+        self.assertFalse(self.bot.has_private_access(8))
+        for user in (8, 9):
+            self.message(user, f"/pilot_consent {self.bot.terms_version}")
+            self.assertTrue(self.bot.has_private_access(user))
+        self.exercise_private_demo_journey()
+        self.assertEqual(self.db.execute("""
+            SELECT c.cohort, c.consent_version, i.starts, i.ends
+            FROM school_order_cohorts c JOIN school_included_coaching i ON i.order_id=c.order_id
+        """).fetchone(), ("restored-demo", self.bot.terms_version, "2026-11-27", "2026-12-03"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_memberships").fetchone(), (1,))
+        self.assertEqual(self.db.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+
+    def exercise_private_demo_journey(self):
+        live_before = self.bot.pilot_orders.metrics(False, None)
         self.message(8, "/start tracking_GR020010")
         self.click_label(8, "Оплатить")
         self.click_label(8, "Я оплатил")
@@ -224,7 +370,10 @@ class DemoCheckoutTest(unittest.TestCase):
         self.message(9, "/coach_report 1 | да")
         self.message(8, "/school_status 2")
         self.assertIn("Курс завершён", self.tg.message.call_args.args[1])
-        self.assertIn("Реальных клиентов: 0. Подтверждено оплаченных дней: 0", self.tg.message.call_args.args[1])
+        status = self.tg.message.call_args.args[1]
+        self.assertIn("Подтверждённая практика: 0", status)
+        self.assertIn("Фактически платящих клиентов: 0", status)
+        self.assertIn("Оплаченных дней: 0", status)
 
         self.message(7, "/pilot_stock 2 reserve 21 | kit-reserve")
         for units in (14, 7):
@@ -237,18 +386,23 @@ class DemoCheckoutTest(unittest.TestCase):
         self.message(8, "/pay")
         self.click_label(8, "Гранола #3 · 350 ₽")
         self.click_label(8, "Оплатить")
-        self.click_label(8, "Я оплатил")
+        confirm = self.click_label(8, "Я оплатил")
+        self.callback(8, confirm)
         self.assertIn("/pilot_delivery 3", self.screen()["text"])
         orders = self.db.execute(
-            "SELECT kind, demo, source, state FROM pilot_orders ORDER BY id"
+            "SELECT kind,total,demo,source,state FROM pilot_orders ORDER BY id"
         ).fetchall()
-        self.assertEqual(orders, [("tracking", 1, "GR020010", "paid"), ("package", 1, None, "paid"),
-                                  ("granola", 1, "GR020010", "paid")])
+        self.assertEqual(orders, [("tracking", 420000, 1, "GR020010", "paid"),
+                                  ("package", 990000, 1, None, "paid"),
+                                  ("granola", 35000, 1, "GR020010", "paid")])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(), (3,))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (1,))
+        self.assertEqual(self.db.execute("SELECT order_id,units,grams FROM pilot_kits ORDER BY order_id").fetchall(),
+                         [(1, 21, 80), (2, 21, 80)])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_work WHERE shared=1").fetchone(), (0,))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_marks").fetchone(), (0,))
         self.assertIn("Гранола: заявок 1, оплат 1", self.bot.pilot_orders.metrics(True, "GR020010"))
-        self.assertNotIn("оплат 1", self.bot.pilot_orders.metrics(False, None))
+        self.assertEqual(self.bot.pilot_orders.metrics(False, None), live_before)
 
     def test_no_bypass_to_cancelled_live_foreign_or_group_order(self):
         self.message(8, "/start tracking")

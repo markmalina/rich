@@ -112,7 +112,7 @@ def verify_group_chats(telegram, bot_id, groups):
 
 
 class GroupTelegram:
-    def __init__(self, telegram, account, db, groups, ledger, faces=None):
+    def __init__(self, telegram, account, db, groups, ledger, faces=None, *, admission=None):
         self.telegram = telegram
         self.bot_id = account["id"]
         self.username = account["username"].casefold()
@@ -120,8 +120,20 @@ class GroupTelegram:
         self.groups = groups
         self.ledger = ledger
         self.faces = faces or {}
+        self.admission = admission
         self.pending_faces = set(self.faces)
         self.face_retry_at = 0
+
+    def access_version(self, user):
+        return "open" if self.admission is None else self.admission(user)
+
+    def remove_unaccepted_publication(self, message):
+        try:
+            self.telegram.api("deleteMessage", {
+                "chat_id": message["chat"]["id"], "message_id": message["message_id"],
+            })
+        except ProviderError as error:
+            logging.warning("Закрытая группа RX: публикация вне допуска не удалена: %s", error)
 
     def sync_group_faces(self):
         now = time.monotonic()
@@ -145,6 +157,9 @@ class GroupTelegram:
             return False
         user = message.get("from", {}).get("id")
         if type(user) is not int or user <= 0 or user != message["chat"]["id"]:
+            return True
+        if self.access_version(user) is None:
+            self.telegram.message(user, "Доступ к закрытым групповым отчётам приостановлен.")
             return True
         page = int(match[2] or 1)
         offset = (page - 1) * HISTORY_PAGE_SIZE
@@ -198,6 +213,8 @@ class GroupTelegram:
             return
         text = message.get("text", "")
         if text.casefold() in {"/report", f"/report@{self.username}"}:
+            if self.access_version(user) is None:
+                return
             self.telegram.api("sendMessage", {
                 "chat_id": chat, "text": "Выбери дату или отправь исправление к уже опубликованному отчёту.",
                 "reply_markup": {"inline_keyboard": [
@@ -215,8 +232,13 @@ class GroupTelegram:
         if (via != self.bot_id or message.get("forward_origin") or message.get("is_automatic_forward")
                 or not separator or re.fullmatch(r"[a-f0-9]{32}", token) is None):
             return
+        access_version = self.access_version(user)
+        if access_version is None:
+            self.remove_unaccepted_publication(message)
+            return
         result = self.journal.confirm(token, Publication(chat, user, message["message_id"], message["date"],
-                                                         via, snapshot), self.bot_id)
+                                                         via, snapshot), self.bot_id,
+                                      admission=access_version)
         if result == "accepted":
             if chat in self.faces:
                 self.pending_faces.add(chat)
@@ -226,6 +248,8 @@ class GroupTelegram:
                 "chat_id": chat, "text": "Отчёт принят." if posted == issued_date else "Отчёт принят с опозданием.",
                 "reply_parameters": {"message_id": message["message_id"], "allow_sending_without_reply": True},
             })
+        elif result == "rejected":
+            self.remove_unaccepted_publication(message)
 
     def query(self, query):
         results = []
@@ -234,7 +258,8 @@ class GroupTelegram:
             chat = int(match[1])
             user = query["from"]["id"]
             group = self.groups.get(chat)
-            if group and user in group.profiles and self.journal.joined(chat, user) is not None:
+            if (group and user in group.profiles and self.journal.joined(chat, user) is not None
+                    and self.access_version(user) is not None):
                 results = self.preview(chat, user, group, match[2] == "вчера", bool(match[3]))
         self.telegram.api("answerInlineQuery", {
             "inline_query_id": query["id"], "results": results, "cache_time": 0, "is_personal": True,
@@ -259,7 +284,8 @@ class GroupTelegram:
             return []
         prefix = ("Исправление. " if correction else "") + ("Опоздание. " if yesterday else "")
         report = Report(prefix + base_report.text, base_report.meets_minimum)
-        token = self.journal.prepare(chat, user, day, issued, report, correction=correction)
+        token = self.journal.prepare(chat, user, day, issued, report, correction=correction,
+                                     admission=self.access_version(user))
         if token is None:
             return []
         return [{
