@@ -127,6 +127,53 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertIn("Гранола: заявок 1, оплат 1", self.bot.pilot_orders.metrics(True, None))
         self.assertNotIn("оплат 1", self.bot.pilot_orders.metrics(False, None))
 
+    def test_paid_school_screen_tracks_access_after_refund(self):
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.click_label(8, "Оплатить")
+        confirm = self.click_label(8, "Я оплатил")
+        self.message(8, "/pilot_refund_request 1")
+        self.message(7, "/pilot_refund 1 100 | partial")
+        self.message(7, "/pilot_suspend 1 on")
+
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        suspended = self.screen()["text"]
+        self.assertIn("приостановлен", suspended)
+        self.assertNotIn("/school_day", suspended)
+        self.assertIn("/pilot_delivery 1", suspended)
+        self.callback(8, confirm)
+        self.assertEqual(self.screen()["text"], suspended)
+        self.message(8, "/school_day 1")
+        self.assertIn("приостановлен", self.tg.message.call_args.args[1])
+
+        self.message(7, "/pilot_suspend 1 off")
+        self.callback(8, confirm)
+        self.assertIn("/school_day 1", self.screen()["text"])
+        self.assertEqual(self.db.execute("SELECT amount FROM pilot_receipts").fetchall(), [(990000,)])
+        self.assertEqual(self.db.execute("SELECT amount FROM pilot_refunds").fetchall(), [(10000,)])
+        self.assertEqual(self.db.execute("SELECT units,grams FROM pilot_kits").fetchall(), [(21, 80)])
+
+    def test_school_link_requires_own_enrolment_and_an_open_lesson(self):
+        self.message(7, "/pilot_offer 8 demo")
+        self.message(7, "/pilot_paid 1 9900 2026-11-28 | next-cohort")
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.assertIn("2026-11-28", self.screen()["text"])
+        self.assertNotIn("/school_day", self.screen()["text"])
+
+        self.now += dt.timedelta(days=1)
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.assertIn("/school_day 1", self.screen()["text"])
+
+        with self.db:
+            self.db.execute("DELETE FROM school_enrolments WHERE order_id=1")
+        self.message(8, "/pay")
+        self.click_label(8, "Школа и продвижение · 9 900 ₽")
+        self.assertIn("сверки с оператором", self.screen()["text"])
+        self.assertNotIn("/school_day", self.screen()["text"])
+
     def test_old_operator_reference_does_not_block_a_new_self_confirmation(self):
         self.message(7, "/pilot_goods 8 demo 1 80 350 | sample")
         self.message(7, "/pilot_paid 1 350 | demo-self:2")

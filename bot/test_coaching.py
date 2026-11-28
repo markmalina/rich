@@ -108,6 +108,33 @@ class CoachingTest(unittest.TestCase):
         self.app.send_due(next_day)
         self.telegram.message.assert_called_once()
 
+    def test_reminders_page_only_links_due_on_the_moscow_calendar(self):
+        # Friday in Moscow begins while it is still Thursday in UTC.
+        midnight = dt.datetime(2026, 11, 26, 21, tzinfo=dt.timezone.utc)
+        with self.db:
+            for client in range(100, 155):
+                weekdays = "чт" if client < 115 else "пт"
+                link = self.db.execute("""
+                    INSERT INTO coach_links(client,tracker,state,demo,weekdays,reminder)
+                    VALUES (?,7,'active',1,?,'00:00')
+                """, (client, weekdays)).lastrowid
+                self.app.schedule(link, dt.date(2026, 11, 25), True)
+                if 115 <= client < 125:
+                    self.app.schedule(link, dt.date(2026, 11, 26), False)
+                    self.app.schedule(link, dt.date(2026, 11, 28), True)
+
+        def recipients():
+            return [entry.args[0] for entry in self.telegram.message.call_args_list]
+
+        self.app.send_due(midnight.astimezone(MOSCOW))
+        self.assertEqual(recipients(), list(range(125, 150)))
+        self.app.send_due(midnight)
+        self.assertEqual(recipients(), list(range(125, 155)))
+        self.app.send_due(midnight)
+        self.assertEqual(recipients(), list(range(125, 155)))
+        self.assertEqual(self.db.execute("SELECT DISTINCT day FROM coach_notices").fetchall(),
+                         [("2026-11-27",)])
+
     def test_reporting_without_minimum_counts_an_honest_no_and_uses_actual_share_time(self):
         link = self.pair(criterion="отчёт")
         before = self.now.replace(hour=23, minute=59, second=59)

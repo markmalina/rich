@@ -94,6 +94,19 @@ class SchoolPilotTest(unittest.TestCase):
                             ("2026-11-26","reconciled",self.now.isoformat()))
         self.assertIn("Подтверждено оплаченных дней: 1",self.cmd(8,"/school_status 1"))
 
+    def test_retention_counts_each_learner_once_across_orders_in_one_cohort(self):
+        for order, buyer in enumerate((8, 8, 9), start=1):
+            self.cmd(7, f"/pilot_offer {buyer} demo")
+            self.cmd(7, f"/pilot_paid {order} 9900 | test-order-{order}")
+
+        self.cmd(8, "/school_day 1 7", 6)
+        self.cmd(8, "/school_day 2 7", 6)
+        self.cmd(8, "/school_work 2 21 | Итоговая работа", 20)
+
+        report = self.cmd(7, "/pilot_cohorts demo", 20)
+        self.assertIn("день 7: 1 из 2", report)
+        self.assertIn("день 21: 1 из 2", report)
+
     def test_retention_counts_calendar_checkpoints_and_separates_cohorts(self):
         self.pilot.live_seller="Учебная модель рабочего продавца"
         for buyer,mode,start in ((8,"demo",""),(9,"demo",""),(10,"demo",""),
