@@ -59,6 +59,19 @@ def clean_space(value, limit=600):
     return value
 
 
+def create_cohort(db, cohort, starts, demo, now):
+    if COHORT_ID.fullmatch(cohort) is None:
+        raise Clarification("ID потока: строчные латинские буквы, цифры, дефис или подчёркивание.")
+    existing = db.execute("SELECT starts,version,demo FROM school_cohorts WHERE id=?", (cohort,)).fetchone()
+    expected = (str(starts), VERSION, int(demo))
+    if existing:
+        if existing != expected:
+            raise Clarification("Поток уже существует с другими параметрами.")
+        return False
+    db.execute("INSERT INTO school_cohorts VALUES (?,?,?,?,?)",
+                    (cohort, str(starts), VERSION, int(demo), now.isoformat()))
+    return True
+
 class School:
     def __init__(self, db, *, access_scope=None):
         self.db = db
@@ -157,17 +170,7 @@ class School:
                 f"Для передачи в течение 15 минут отправь /school_confirm_share {order_id} {token}.")
 
     def create_cohort(self, cohort, starts, demo, now):
-        if COHORT_ID.fullmatch(cohort) is None:
-            raise Clarification("ID потока: строчные латинские буквы, цифры, дефис или подчёркивание.")
-        existing = self.db.execute("SELECT starts,version,demo FROM school_cohorts WHERE id=?", (cohort,)).fetchone()
-        expected = (str(starts), VERSION, int(demo))
-        if existing:
-            if existing != expected:
-                raise Clarification("Поток уже существует с другими параметрами.")
-            return False
-        self.db.execute("INSERT INTO school_cohorts VALUES (?,?,?,?,?)",
-                        (cohort, str(starts), VERSION, int(demo), now.isoformat()))
-        return True
+        return create_cohort(self.db, cohort, starts, demo, now)
 
     def assign_order(self, order_id, cohort, source, consent_version=None):
         mode = self.db.execute("""

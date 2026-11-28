@@ -4,7 +4,7 @@
 """Check RX pilot credentials and destinations without changing remote state."""
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import datetime as dt
 import json
 import os
@@ -12,10 +12,13 @@ from pathlib import Path
 import re
 import sqlite3
 
+from .coaching import day_arg
 from .group_face import GroupFace, HEADER, TITLE
 from .group_telegram import configured_groups, verify_group_chats
+from .ledger import Clarification, MOSCOW
 from .onboarding import OAUTH_KEYS, PILOT_REQUIRED, PilotProvisioner, oauth_session
 from .providers import ProviderError, Telegram
+from .school import COHORT_ID, create_cohort
 
 BOT_USERNAME = "TRACKER_PILOT_BOT_USERNAME"
 GOOGLE_EMAIL = "TRACKER_PILOT_GOOGLE_EMAIL"
@@ -26,7 +29,6 @@ CLOSED_FLAGS = ("TRACKER_PILOT", "TRACKER_DEMO_CHECKOUT", "TRACKER_SCHOOL", "TRA
 ADMISSION_SETTING = "TRACKER_PRIVATE_ADMISSION_IDS"
 TERMS_SETTING = "TRACKER_PRIVATE_TERMS"
 COHORT_SETTING = "TRACKER_SCHOOL_COHORT"
-COHORT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 
 
 def legacy_google_settings(env):
@@ -175,6 +177,24 @@ def local_database(path, *, now=None, max_queue_age=900, expect_restored=False, 
         db.close()
 
 
+def initialize_cohort(path, cohort, starts, *, max_queue_age):
+    """Seed a prepared isolated volume while its worker is stopped."""
+    import fcntl
+
+    path = path.resolve()
+    lock_path = path.parent / "bot.lock"
+    try:
+        with os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "r+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            local_database(path, max_queue_age=max_queue_age, expect_restored=True)
+            with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as db, db:
+                return create_cohort(db, cohort, starts, True, dt.datetime.now(MOSCOW))
+    except BlockingIOError:
+        raise ProviderError("RX pilot", "isolated worker lock is already held") from None
+    except (OSError, sqlite3.Error):
+        raise ProviderError("RX pilot", "isolated training cohort could not be initialized") from None
+
+
 def check(env, forbid=None):
     if env.get("TRACKER_TELEGRAM_ONLY") == "1":
         raise ProviderError("RX pilot", "TRACKER_TELEGRAM_ONLY conflicts with the pilot")
@@ -215,8 +235,13 @@ def main():
     parser.add_argument("--forbid-data-dir", type=Path, help="Reject the personal worker data directory")
     parser.add_argument("--expect-restored", action="store_true", help="Require a restored DB with cleared consent and poll")
     parser.add_argument("--max-queue-age", type=int, default=900)
+    parser.add_argument("--init-cohort", metavar="YYYY-MM-DD",
+                        help="Initialize the configured training cohort offline on a prepared volume")
     args = parser.parse_args()
     try:
+        if args.init_cohort is not None and not (args.closed and args.local_only
+                and args.forbid_bot and args.forbid_data_dir):
+            raise ProviderError("RX pilot", "cohort initialization requires --closed, --local-only and both exclusions")
         if args.closed:
             config = closed_config(os.environ, forbid_bot=args.forbid_bot, forbid_data=args.forbid_data_dir)
             if args.database is None:
@@ -224,13 +249,17 @@ def main():
             expected_database = Path(os.environ["TRACKER_DATA_DIR"]).resolve() / "bot.sqlite"
             if args.database.resolve() != expected_database:
                 raise ProviderError("RX pilot", "--database must be bot.sqlite in TRACKER_DATA_DIR")
+            if args.init_cohort is not None:
+                created = initialize_cohort(expected_database, config["cohort"], day_arg(args.init_cohort),
+                                            max_queue_age=args.max_queue_age)
+                print("Учебный поток создан." if created else "Учебный поток уже подготовлен.")
             state = local_database(args.database, max_queue_age=args.max_queue_age,
                                    expect_restored=args.expect_restored, expected_cohort=config["cohort"])
         elif args.local_only or args.database or args.forbid_data_dir or args.expect_restored:
             raise ProviderError("RX pilot", "local rehearsal options require --closed")
         if not args.local_only:
             check(os.environ, args.forbid_bot)
-    except ProviderError as error:
+    except (Clarification, ProviderError) as error:
         parser.exit(1, f"{error}\n")
     except (ValueError, KeyError, TypeError, AttributeError, ImportError) as error:
         parser.exit(1, f"RX pilot: {type(error).__name__}\n")

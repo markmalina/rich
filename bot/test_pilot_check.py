@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import datetime as dt
+import fcntl
 from contextlib import redirect_stdout
 from io import StringIO
 import os
@@ -106,8 +107,10 @@ class ClosedPilotPreflightTest(unittest.TestCase):
             CREATE TABLE event_writes(user INTEGER,origin TEXT,queued_at INTEGER);
             CREATE TABLE pilot_orders(id INTEGER PRIMARY KEY,demo INTEGER);
             CREATE TABLE coach_links(id INTEGER PRIMARY KEY,demo INTEGER);
-            CREATE TABLE school_cohorts(id TEXT PRIMARY KEY,demo INTEGER);
-            INSERT INTO school_cohorts VALUES ('first-2026',1);
+            CREATE TABLE school_cohorts(
+                id TEXT PRIMARY KEY, starts TEXT, version TEXT, demo INTEGER, created TEXT
+            );
+            INSERT INTO school_cohorts VALUES ('first-2026','2026-11-28','fixture',1,'fixture');
             CREATE TABLE private_consents(user INTEGER PRIMARY KEY,version TEXT);
             CREATE TABLE operational_poll(id INTEGER PRIMARY KEY,last_success INTEGER);
         """)
@@ -165,6 +168,53 @@ class ClosedPilotPreflightTest(unittest.TestCase):
         path.rename(elsewhere)
         path.symlink_to(elsewhere)
         self.assert_cli_rejects(self.env, path, "--database must be bot.sqlite in TRACKER_DATA_DIR")
+
+    def test_prepared_volume_can_initialize_exactly_one_demo_cohort_without_remote_calls(self):
+        path = self.database()
+        personal = Path(self.root.name) / "personal"
+        personal.mkdir()
+        reserved = personal / "bot.sqlite"
+        reserved.write_bytes(b"fixture personal file")
+        env = {**self.env, "TRACKER_SCHOOL_COHORT": "offline-rehearsal"}
+        argv = ["pilot_check", "--closed", "--local-only", "--database", str(path),
+                "--forbid-bot", "PersonalBot", "--forbid-data-dir", str(personal), "--init-cohort"]
+
+        def initialize(day):
+            output = StringIO()
+            with (patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", [*argv, day]),
+                  patch("bot.pilot_check.check") as remote, redirect_stdout(output)):
+                main()
+            remote.assert_not_called()
+            return output.getvalue()
+
+        self.assertIn("Учебный поток создан", initialize("2026-12-01"))
+        before = path.read_bytes()
+        self.assertIn("Учебный поток уже подготовлен", initialize("2026-12-01"))
+        with patch("sys.stderr", StringIO()) as errors, self.assertRaises(SystemExit) as conflict:
+            initialize("2026-12-02")
+        self.assertEqual(conflict.exception.code, 1)
+        self.assertIn("другими параметрами", errors.getvalue())
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(reserved.read_bytes(), b"fixture personal file")
+        self.assertEqual(local_database(path, expected_cohort="offline-rehearsal",
+                                       expect_restored=True)["poll"], "poll_waiting")
+
+    def test_offline_initialization_respects_the_worker_lock(self):
+        path = self.database()
+        before = path.read_bytes()
+        argv = ["pilot_check", "--closed", "--local-only", "--init-cohort", "2026-12-01",
+                "--database", str(path), "--forbid-bot", "PersonalBot",
+                "--forbid-data-dir", str(Path(self.root.name) / "personal")]
+        with (self.data / "bot.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with (patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", argv),
+                  patch("bot.pilot_check.check") as remote, patch("sys.stderr", StringIO()) as errors,
+                  self.assertRaises(SystemExit) as busy):
+                main()
+            self.assertEqual(busy.exception.code, 1)
+            self.assertIn("worker lock is already held", errors.getvalue())
+            remote.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
 
     def test_rejects_personal_resources_commercial_mode_and_unlimited_ai(self):
         with self.assertRaisesRegex(ProviderError, "reserved for the personal environment"):
