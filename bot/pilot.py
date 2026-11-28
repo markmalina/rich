@@ -157,7 +157,11 @@ class Pilot:
             self.require_operator(user)
             if len(words)!=1 or not valid_id(words[0]) or int(words[0])==order[0]:
                 raise Clarification("Формат: /pilot_mentor ID_заказа ID_наставника. Укажи отдельный профиль.")
-            updated=self.db.execute("UPDATE school_enrolments SET mentor=? WHERE order_id=?", (int(words[0]),order_id))
+            new_mentor = int(words[0])
+            updated = self.db.execute("""
+                UPDATE school_enrolments SET mentor_revision=mentor_revision+(mentor<>?), mentor=?
+                WHERE order_id=?
+            """, (new_mentor, new_mentor, order_id))
             if not updated.rowcount:
                 raise Clarification("Место в потоке пока не создано.")
             return "Назначение наставника обновлено. Предыдущий наставник теряет доступ."
