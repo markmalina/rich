@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import tempfile
 
 from .coaching import day_arg
 from .group_face import GroupFace, HEADER, TITLE
@@ -177,15 +178,79 @@ def local_database(path, *, now=None, max_queue_age=900, expect_restored=False, 
         db.close()
 
 
-def initialize_cohort(path, cohort, starts, *, max_queue_age):
-    """Seed a prepared isolated volume while its worker is stopped."""
+def bootstrap_volume(directory, env, cohort, starts):
+    """Build a complete demo-only schema off to the side, without network calls."""
+    from .coaching import Coaching
+    from .demo_checkout import DemoCheckout
+    from .main import Bot
+    from .operations import Operations
+    from .sales import Sales
+
+    class OfflineTelegram:
+        def api(self, *args, **kwargs):
+            raise ProviderError("RX pilot", "offline bootstrap attempted Telegram")
+
+        def message(self, *args, **kwargs):
+            raise ProviderError("RX pilot", "offline bootstrap attempted Telegram")
+
+    owner = int(env["TRACKER_OWNER_ID"])
+    admitted = frozenset(json.loads(env[ADMISSION_SETTING]))
+    telegram = OfflineTelegram()
+    bot = Bot(telegram, None, None, directory, owner, admitted=admitted, terms=env[TERMS_SETTING])
+    try:
+        bot.coaching = Coaching(bot.db, telegram, owner, demo_only=True, admitted=bot.has_private_access)
+        bot.pilot_orders = Sales(bot.db, telegram, owner, access_scope=bot.school_access_scope)
+        bot.demo_checkout = DemoCheckout(bot.db, telegram, bot.pilot_orders, bot.coaching,
+                                         school_cohort=cohort, consent_version=bot.terms_version)
+        bot.operations = Operations(bot.db, telegram, owner, directory,
+                                    ai_disabled=env.get("TRACKER_AI_DISABLED") == "1", alerts=True)
+        with bot.db:
+            create_cohort(bot.db, cohort, starts, True, dt.datetime.now(MOSCOW))
+        if bot.db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+            raise ProviderError("RX pilot", "new isolated database failed integrity check")
+    finally:
+        if bot.operations is not None:
+            bot.operations.ledger.close()
+        bot.db.close()
+    database = directory / "bot.sqlite"
+    os.chmod(database, 0o600)
+    with database.open("rb") as stream:
+        os.fsync(stream.fileno())
+    return database, directory / "operations"
+
+
+def initialize_cohort(path, cohort, starts, *, max_queue_age, env):
+    """Prepare or seed an isolated volume while its worker is stopped."""
     import fcntl
 
     path = path.resolve()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path = path.parent / "bot.lock"
     try:
         with os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), "r+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if not path.exists():
+                unexpected = [item.name for item in path.parent.iterdir() if item.name != "bot.lock"]
+                if unexpected:
+                    raise ProviderError("RX pilot", "new isolated data directory is not empty")
+                with tempfile.TemporaryDirectory(dir=path.parent, prefix=".pilot-init-") as temporary:
+                    staged = Path(temporary)
+                    database, operations = bootstrap_volume(staged, env, cohort, starts)
+                    local_database(database, max_queue_age=max_queue_age, expect_restored=True,
+                                   expected_cohort=cohort)
+                    installed_operations = path.parent / "operations"
+                    os.replace(operations, installed_operations)
+                    try:
+                        os.replace(database, path)
+                    except OSError:
+                        os.replace(installed_operations, operations)
+                        raise
+                    directory = os.open(path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory)
+                    finally:
+                        os.close(directory)
+                return True
             local_database(path, max_queue_age=max_queue_age, expect_restored=True)
             with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as db, db:
                 return create_cohort(db, cohort, starts, True, dt.datetime.now(MOSCOW))
@@ -251,7 +316,7 @@ def main():
                 raise ProviderError("RX pilot", "--database must be bot.sqlite in TRACKER_DATA_DIR")
             if args.init_cohort is not None:
                 created = initialize_cohort(expected_database, config["cohort"], day_arg(args.init_cohort),
-                                            max_queue_age=args.max_queue_age)
+                                            max_queue_age=args.max_queue_age, env=os.environ)
                 print("Учебный поток создан." if created else "Учебный поток уже подготовлен.")
             state = local_database(args.database, max_queue_age=args.max_queue_age,
                                    expect_restored=args.expect_restored, expected_cohort=config["cohort"])

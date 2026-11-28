@@ -199,6 +199,86 @@ class ClosedPilotPreflightTest(unittest.TestCase):
         self.assertEqual(local_database(path, expected_cohort="offline-rehearsal",
                                        expect_restored=True)["poll"], "poll_waiting")
 
+    def test_clean_volume_bootstraps_complete_demo_schema_before_first_poll(self):
+        personal = Path(self.root.name) / "personal"
+        personal.mkdir()
+        env = {**self.env, "TRACKER_SCHOOL_COHORT": "clean-rehearsal"}
+        path = self.data / "bot.sqlite"
+        argv = ["pilot_check", "--closed", "--local-only", "--database", str(path),
+                "--forbid-bot", "PersonalBot", "--forbid-data-dir", str(personal),
+                "--init-cohort", "2026-12-01", "--expect-restored"]
+        output = StringIO()
+        with (patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv),
+              patch("bot.pilot_check.check") as remote, redirect_stdout(output)):
+            main()
+        remote.assert_not_called()
+        self.assertIn("Учебный поток создан", output.getvalue())
+        self.assertIn("режим demo-only, очередь 0, опрос poll_waiting", output.getvalue())
+        self.assertTrue(path.is_file())
+        self.assertTrue((self.data / "operations" / "erasures.sqlite").is_file())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        db = sqlite3.connect(path)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("SELECT id,starts,demo FROM school_cohorts").fetchall(),
+                         [("clean-rehearsal", "2026-12-01", 1)])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM private_consents").fetchone(), (0,))
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM operational_poll").fetchone(), (0,))
+        required = {"pilot_orders", "pilot_goods", "school_enrolments", "coach_links",
+                    "pilot_tracking_days", "privacy_requests", "deferred_inbox", "event_writes"}
+        tables = {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertTrue(required <= tables)
+
+    def test_clean_volume_refuses_unknown_files_and_held_worker_lock(self):
+        self.data.mkdir()
+        sentinel = self.data / "unknown.data"
+        sentinel.write_text("keep", encoding="utf-8")
+        personal = Path(self.root.name) / "personal"
+        argv = ["pilot_check", "--closed", "--local-only", "--database", str(self.data / "bot.sqlite"),
+                "--forbid-bot", "PersonalBot", "--forbid-data-dir", str(personal),
+                "--init-cohort", "2026-12-01"]
+        with (patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", argv),
+              patch("bot.pilot_check.check") as remote, patch("sys.stderr", StringIO()) as errors,
+              self.assertRaises(SystemExit) as unsafe):
+            main()
+        self.assertEqual(unsafe.exception.code, 1)
+        self.assertIn("data directory is not empty", errors.getvalue())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "keep")
+        self.assertFalse((self.data / "bot.sqlite").exists())
+        remote.assert_not_called()
+
+        sentinel.unlink()
+        with (self.data / "bot.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with (patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", argv),
+                  patch("sys.stderr", StringIO()) as errors, self.assertRaises(SystemExit) as busy):
+                main()
+            self.assertEqual(busy.exception.code, 1)
+            self.assertIn("worker lock is already held", errors.getvalue())
+        self.assertFalse((self.data / "bot.sqlite").exists())
+
+    def test_clean_volume_rolls_back_local_ledger_when_database_publish_fails(self):
+        personal = Path(self.root.name) / "personal"
+        env = {**self.env, "TRACKER_SCHOOL_COHORT": "rollback-rehearsal"}
+        path = self.data / "bot.sqlite"
+        argv = ["pilot_check", "--closed", "--local-only", "--database", str(path),
+                "--forbid-bot", "PersonalBot", "--forbid-data-dir", str(personal),
+                "--init-cohort", "2026-12-01"]
+        replace = os.replace
+
+        def fail_database(source, destination):
+            if Path(destination) == path:
+                raise OSError("synthetic publish failure")
+            return replace(source, destination)
+
+        with (patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv),
+              patch("bot.pilot_check.os.replace", side_effect=fail_database),
+              patch("sys.stderr", StringIO()) as errors, self.assertRaises(SystemExit) as failed):
+            main()
+        self.assertEqual(failed.exception.code, 1)
+        self.assertIn("could not be initialized", errors.getvalue())
+        self.assertFalse(path.exists())
+        self.assertFalse((self.data / "operations").exists())
+
     def test_offline_initialization_respects_the_worker_lock(self):
         path = self.database()
         before = path.read_bytes()
