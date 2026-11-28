@@ -188,6 +188,8 @@ class Operations:
             copy_database(self.db,filename,overwrite=filename.exists())
             copy_database(self.ledger,ledger,overwrite=ledger.exists())
             write_snapshot_manifest(filename,ledger,manifest)
+        else:
+            verify_snapshot_manifest(filename,ledger,manifest)
         return filename
 
     def run_daily(self,now):
@@ -309,7 +311,17 @@ class Operations:
         if disk.free<max(32*1024*1024,disk.total//20):
             info+=" Мало места."
         backups=list(self.storage.glob("rx-????-??-??.sqlite"))
-        latest=max((p.stem.removeprefix("rx-") for p in backups),default="ещё нет")
+        latest_path=max(backups,default=None)
+        latest=latest_path.stem.removeprefix("rx-") if latest_path else "ещё нет"
+        bundle=""
+        if latest_path:
+            ledger=self.storage/f"rx-{latest}-erasures.sqlite"
+            manifest=self.storage/f"rx-{latest}.manifest.json"
+            try:
+                verify_snapshot_manifest(latest_path,ledger,manifest)
+                bundle=" · комплект проверен"
+            except (OSError,RuntimeError):
+                bundle=" · комплект повреждён или неполон"
         age=self.oldest_queue(now)
         oldest=f" Самая старая: {age//60} мин." if age is not None else ""
         last_poll = self.last_poll.astimezone(MOSCOW).strftime("%d.%m %H:%M") if self.last_poll else "ожидается"
@@ -317,7 +329,7 @@ class Operations:
         if self.ai_quota is not None and not self.ai_disabled:
             used,limit=self.ai_quota.status(now)
             ai=f"обращения {used} из {limit} за день МСК"
-        return (f"Копия SQLite: {latest}. {info}\n"
+        return (f"Копия SQLite: {latest}{bundle}. {info}\n"
                 f"Опрос Telegram: {last_poll}. ИИ: {ai}.\n"
                 f"Очередь личных записей: {counts.get('event_writes',0)}. "
                 f"Ожидают во «Входящих»: {counts.get('deferred_inbox',0)}.{oldest} "

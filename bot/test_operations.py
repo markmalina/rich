@@ -97,9 +97,14 @@ class OperationsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,"database"):
             verify_snapshot_manifest(changed,ledger,manifest)
 
+        source.write_bytes(source.read_bytes()+b"changed")
+        with self.assertRaisesRegex(RuntimeError,"database"):
+            self.ops.snapshot(self.now.date())
+        self.assertIn("повреждён",self.ops.health())
+
         rebuilt=self.root/"rebuilt.manifest.json"
-        write_snapshot_manifest(source,ledger,rebuilt,created=self.now)
-        self.assertEqual(verify_snapshot_manifest(source,ledger,rebuilt)["created"],self.now.isoformat())
+        write_snapshot_manifest(changed,ledger,rebuilt,created=self.now)
+        self.assertEqual(verify_snapshot_manifest(changed,ledger,rebuilt)["created"],self.now.isoformat())
 
     def test_manifested_bundle_restores_under_new_names_and_fails_closed(self):
         order=self.enrol(8,"manifested")
