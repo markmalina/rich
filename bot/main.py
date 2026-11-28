@@ -181,15 +181,16 @@ class Bot:
                     except (OSError, sqlite3.Error, RuntimeError) as error:
                         logging.warning("Локальная резервная копия RX: %s", type(error).__name__)
                 offset = self.get("offset", 0)
-                self.reconcile_inbox(offset)
-                self.reconcile_events(offset)
+                inbox_attempted = self.reconcile_inbox(offset)
+                events_attempted = self.reconcile_events(offset)
                 if self.operations is not None:
                     try:
                         self.operations.check_alerts(dt.datetime.now(MOSCOW))
                     except (OSError, sqlite3.Error) as error:
                         logging.warning("Проверка состояния RX: %s", type(error).__name__)
                 updates = self.telegram.api("getUpdates", {
-                    "offset": offset, "timeout": 25, "allowed_updates": update_types,
+                    "offset": offset, "timeout": 1 if inbox_attempted or events_attempted else 25,
+                    "allowed_updates": update_types,
                 })
                 if self.operations is not None:
                     self.operations.confirm_poll(dt.datetime.now(MOSCOW))
@@ -337,7 +338,8 @@ class Bot:
 
     def reconcile_inbox(self, offset):
         now = int(time.time())
-        for update_id, user, received, payload in self.inbox_writes.due(offset, now):
+        due = self.inbox_writes.due(offset, now)
+        for update_id, user, received, payload in due:
             self.inbox_writes.postpone(update_id, now + 120)
             if not self.has_private_access(user):
                 continue
@@ -354,6 +356,7 @@ class Bot:
                     logging.warning("Входящие RX: обработка отложена")
                     continue
             self.inbox_writes.finish(update_id)
+        return bool(due)
 
     def registered_sheet(self, user):
         if not self.has_private_access(user):
@@ -715,7 +718,8 @@ class Bot:
 
     def reconcile_events(self, offset):
         now = int(time.time())
-        for batch in self.event_writes.due(offset, now):
+        due = self.event_writes.due(offset, now)
+        for batch in due:
             self.event_writes.postpone(batch, now + 120)
             sheets = self.registered_sheet(batch.user)
             if sheets is None:
@@ -732,6 +736,7 @@ class Bot:
                     continue
                 logging.warning("Подтверждение записи RX: адресат больше не принимает личные ответы")
             self.event_writes.finish(batch.user, batch.origin)
+        return bool(due)
 
     def reply(self, update, chat, text, question=None, *, settled_origin=None):
         with self.db:

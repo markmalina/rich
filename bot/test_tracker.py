@@ -365,6 +365,47 @@ class ReplayTest(unittest.TestCase):
                 self.assertEqual(len(google.events), 2)
                 self.assertEqual(sum("События" in call.args[0] for call in outgoing.call_args_list), 1)
 
+    def test_polling_uses_short_wait_until_ready_reconciliations_are_drained(self):
+        google, telegram = FakeGoogle(), Mock()
+        model, message = self.set_up_transfer(google)
+        append = google.append
+        delayed = []
+
+        def postpone(area, rows):
+            if "События" in area:
+                delayed.extend(rows)
+                raise ProviderError("Google Sheets", "connection")
+            return append(area, rows)
+
+        with tempfile.TemporaryDirectory() as directory:
+            bot = Bot(telegram, google, model, Path(directory), 7)
+            try:
+                with patch.object(google, "append", side_effect=postpone):
+                    for number in range(50, 56):
+                        bot.handle(number, {**message, "message_id": number}, NOW)
+                self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM event_writes").fetchone(), (6,))
+                google.events.extend(delayed)
+                bot.put("offset", 56)
+
+                timeouts = []
+
+                def poll(method, body):
+                    self.assertEqual(method, "getUpdates")
+                    timeouts.append(body["timeout"])
+                    if body["timeout"] == 25:
+                        raise KeyboardInterrupt
+                    return []
+
+                telegram.api.side_effect = poll
+                with (patch("bot.main.time.sleep", side_effect=AssertionError("polling loop failed")),
+                      self.assertRaises(KeyboardInterrupt)):
+                    bot.run()
+                self.assertEqual(timeouts, [1, 1, 1, 25])
+                self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM event_writes").fetchone(), (0,))
+                self.assertEqual(len(google.events), 12)
+            finally:
+                bot.db.close()
+
     def test_reconciled_event_does_not_retry_permanent_private_delivery_failure(self):
         google, telegram = FakeGoogle(), Mock()
         model, message = self.set_up_transfer(google)

@@ -88,6 +88,7 @@
     "bot/event_write.py": "AGPL-3.0-only",
     "bot/inbox_write.py": "AGPL-3.0-only",
     "bot/test_pilot_acceptance.py": "AGPL-3.0-only",
+    "bot/benchmark_t34.py": "AGPL-3.0-only",
     "bot/pilot_check.py": "AGPL-3.0-only",
     "bot/test_pilot_check.py": "AGPL-3.0-only",
     "bot/voice_check.py": "AGPL-3.0-only",
