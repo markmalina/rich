@@ -11,7 +11,8 @@ from .coaching import Coaching
 from .demo_checkout import DemoCheckout
 from .ledger import MOSCOW
 from .main import ADMISSION_REQUIRED, ADMISSION_SETTING, Bot, private_admission
-from .operations import Operations
+from .operations import Operations, restore_database
+from .pilot_check import local_database
 from .providers import ProviderError
 from .sales import Sales
 
@@ -20,16 +21,21 @@ class DemoCheckoutTest(unittest.TestCase):
     def setUp(self):
         root = TemporaryDirectory()
         self.addCleanup(root.cleanup)
+        self.root = Path(root.name)
         self.tg = Mock()
-        self.bot = Bot(self.tg, None, None, Path(root.name), 7)
-        self.db = self.bot.db
-        self.addCleanup(self.db.close)
-        self.bot.pilot_orders = Sales(self.db, self.tg, 7)
-        self.bot.coaching = Coaching(self.db, self.tg, 7, demo_only=True,
-                                     admitted=self.bot.has_private_access)
-        self.bot.demo_checkout = DemoCheckout(self.db, self.tg, self.bot.pilot_orders, self.bot.coaching)
         self.update = 0
         self.now = dt.datetime(2026, 11, 27, 20, 0, tzinfo=MOSCOW)
+        self.attach_worker(self.root)
+
+    def attach_worker(self, path, *, admitted=None, terms=None, cohort=None):
+        self.bot = Bot(self.tg, None, None, path, 7, admitted=admitted, terms=terms)
+        self.db = self.bot.db
+        self.addCleanup(self.db.close)
+        self.bot.pilot_orders = Sales(self.db, self.tg, 7, access_scope=self.bot.school_access_scope)
+        self.bot.coaching = Coaching(self.db, self.tg, 7, demo_only=True,
+                                     admitted=self.bot.has_private_access)
+        self.bot.demo_checkout = DemoCheckout(self.db, self.tg, self.bot.pilot_orders, self.bot.coaching,
+                                              school_cohort=cohort, consent_version=self.bot.terms_version)
 
     def update_bot(self, **payload):
         self.update += 1
@@ -284,6 +290,49 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertRegex(rows[1][1], r"^demo-self:2:[0-9a-f]{32}$")
 
     def test_t36_t38_private_referral_four_demo_payments_and_delivery(self):
+        self.exercise_private_demo_journey()
+
+    def test_t36_t38_closed_cohort_journey_on_a_restored_volume(self):
+        source = self.root / "source"
+        source.mkdir()
+        restored = self.root / "restored"
+        opts = {"admitted": {8, 9}, "terms": "Условия тестового потока", "cohort": "restored-demo"}
+        self.attach_worker(source, **opts)
+        self.message(7, "/pilot_cohort_create restored-demo 2026-11-27 demo")
+        old_consent = f"/pilot_consent {self.bot.terms_version}"
+        for user in (8, 9):
+            self.message(user, old_consent)
+            self.assertTrue(self.bot.has_private_access(user))
+
+        ops = Operations(self.db, self.tg, 7, source)
+        self.addCleanup(ops.ledger.close)
+        ops.confirm_poll(self.now)
+        snapshot = ops.snapshot(self.now.date())
+        prefix = ops.storage / f"rx-{self.now.date()}"
+        database = restored / "bot.sqlite"
+        restore_database(snapshot, database, prefix.with_name(prefix.name + "-erasures.sqlite"),
+                         prefix.with_suffix(".manifest.json"), current_ledger_path=ops.ledger_path)
+        check = local_database(database, expect_restored=True, expected_cohort="restored-demo", now=self.now)
+        self.assertEqual((check["mode"], check["queue"], check["poll"]), ("demo-only", 0, "poll_waiting"))
+
+        self.attach_worker(restored, **opts)
+        self.assertFalse(self.bot.has_private_access(8))
+        self.message(8, old_consent)
+        self.message(8, "/start tracking_GR020010")
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_orders").fetchone(), (0,))
+        self.assertFalse(self.bot.has_private_access(8))
+        for user in (8, 9):
+            self.message(user, f"/pilot_consent {self.bot.terms_version}")
+            self.assertTrue(self.bot.has_private_access(user))
+        self.exercise_private_demo_journey()
+        self.assertEqual(self.db.execute("""
+            SELECT c.cohort, c.consent_version, i.starts, i.ends
+            FROM school_order_cohorts c JOIN school_included_coaching i ON i.order_id=c.order_id
+        """).fetchone(), ("restored-demo", self.bot.terms_version, "2026-11-27", "2026-12-03"))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_memberships").fetchone(), (1,))
+        self.assertEqual(self.db.execute("PRAGMA integrity_check").fetchone(), ("ok",))
+
+    def exercise_private_demo_journey(self):
         live_before = self.bot.pilot_orders.metrics(False, None)
         self.message(8, "/start tracking_GR020010")
         self.click_label(8, "Оплатить")
