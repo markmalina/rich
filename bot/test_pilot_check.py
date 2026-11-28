@@ -89,7 +89,8 @@ class ClosedPilotPreflightTest(unittest.TestCase):
             "TRACKER_PILOT_REGISTRY_ID": "registry", "TRACKER_PILOT_BOT_USERNAME": "ClosedPilotBot",
             "TRACKER_PILOT_GOOGLE_EMAIL": "pilot@example.invalid", "TRACKER_PRIVATE_ADMISSION_IDS": "[]",
             "TRACKER_PRIVATE_TERMS": "Учебные условия v1", "TRACKER_SCHOOL_COHORT": "first-2026",
-            "TRACKER_AI_DISABLED": "1",
+            "TRACKER_AI_DISABLED": "1", "TRACKER_SPREADSHEET_ID": "isolated-sheet",
+            "TRACKER_APPS_SCRIPT_URL": "https://example.invalid/script", "TRACKER_APPS_SCRIPT_TOKEN": "fixture",
             **{name: "1" for name in ("TRACKER_PILOT", "TRACKER_DEMO_CHECKOUT", "TRACKER_SCHOOL",
                                        "TRACKER_COACHING", "TRACKER_FULFILLMENT", "TRACKER_OPERATIONS",
                                        "TRACKER_OPERATIONS_ALERTS")},
@@ -105,6 +106,8 @@ class ClosedPilotPreflightTest(unittest.TestCase):
             CREATE TABLE event_writes(user INTEGER,origin TEXT,queued_at INTEGER);
             CREATE TABLE pilot_orders(id INTEGER PRIMARY KEY,demo INTEGER);
             CREATE TABLE coach_links(id INTEGER PRIMARY KEY,demo INTEGER);
+            CREATE TABLE school_cohorts(id TEXT PRIMARY KEY,demo INTEGER);
+            INSERT INTO school_cohorts VALUES ('first-2026',1);
             CREATE TABLE private_consents(user INTEGER PRIMARY KEY,version TEXT);
             CREATE TABLE operational_poll(id INTEGER PRIMARY KEY,last_success INTEGER);
         """)
@@ -131,6 +134,37 @@ class ClosedPilotPreflightTest(unittest.TestCase):
         self.assertEqual(output.getvalue(),
                          "Закрытый учебный контур: настройки безопасны, SQLite ok, "
                          "режим demo-only, очередь 0, опрос poll_waiting.\n")
+
+    def assert_cli_rejects(self, env, database, error):
+        argv = ["pilot_check", "--closed", "--local-only", "--database", str(database)]
+        stderr = StringIO()
+        with (patch.dict(os.environ, env, clear=True), patch.object(sys, "argv", argv),
+              patch("bot.pilot_check.check") as remote, patch("sys.stderr", stderr),
+              self.assertRaises(SystemExit) as failed):
+            main()
+        self.assertEqual(failed.exception.code, 1)
+        self.assertIn(error, stderr.getvalue())
+        remote.assert_not_called()
+
+    def test_cli_checks_owner_sheet_settings_and_named_cohort(self):
+        path = self.database()
+        for key in ("TRACKER_SPREADSHEET_ID", "TRACKER_APPS_SCRIPT_TOKEN"):
+            with self.subTest(missing=key):
+                env = {name: value for name, value in self.env.items() if name != key}
+                self.assert_cli_rejects(env, path, key)
+        self.assert_cli_rejects({**self.env, "TRACKER_REPORT_GROUPS": "{invalid"}, path,
+                                "invalid group report configuration")
+        self.assert_cli_rejects({**self.env, "TRACKER_SCHOOL_COHORT": " first-2026 "}, path,
+                                "invalid closed-pilot cohort")
+        self.assert_cli_rejects({**self.env, "TRACKER_SCHOOL_COHORT": "missing"}, path,
+                                "configured training cohort is missing")
+
+    def test_cli_requires_database_to_live_in_the_selected_volume(self):
+        path = self.database()
+        elsewhere = self.data.parent / "other.sqlite"
+        path.rename(elsewhere)
+        path.symlink_to(elsewhere)
+        self.assert_cli_rejects(self.env, path, "--database must be bot.sqlite in TRACKER_DATA_DIR")
 
     def test_rejects_personal_resources_commercial_mode_and_unlimited_ai(self):
         with self.assertRaisesRegex(ProviderError, "reserved for the personal environment"):

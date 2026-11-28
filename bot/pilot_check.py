@@ -67,7 +67,8 @@ def verify_telegram(telegram, expected, *, inline=False, forbid=None):
 def closed_config(env, *, forbid_bot=None, forbid_data=None):
     """Validate a closed demo worker without contacting Telegram, Google or OpenAI."""
     required = ("TELEGRAM_BOT_TOKEN", "TRACKER_OWNER_ID", "TRACKER_DATA_DIR", *PILOT_CONFIG_REQUIRED,
-                ADMISSION_SETTING, TERMS_SETTING, COHORT_SETTING)
+                ADMISSION_SETTING, TERMS_SETTING, COHORT_SETTING, "TRACKER_SPREADSHEET_ID",
+                *legacy_google_settings(env))
     if env.get("TRACKER_AI_DISABLED") != "1":
         required += ("OPENAI_API_KEY", "TRACKER_AI_DAILY_CALLS")
     missing = [name for name in required if not env.get(name, "").strip()]
@@ -85,13 +86,12 @@ def closed_config(env, *, forbid_bot=None, forbid_data=None):
         admitted = json.loads(env[ADMISSION_SETTING])
     except (ValueError, TypeError):
         raise ProviderError("RX pilot", "invalid closed-pilot owner or admission configuration") from None
-    if owner <= 0 or (not isinstance(admitted, list)
+    if not 0 < owner < 2**63 or (not isinstance(admitted, list)
                       or any(type(user) is not int or not 0 < user < 2**63 for user in admitted)):
         raise ProviderError("RX pilot", "invalid closed-pilot owner or admission configuration")
-    terms = env[TERMS_SETTING].strip()
-    if len(terms) > 3000:
+    if len(env[TERMS_SETTING]) > 3000:
         raise ProviderError("RX pilot", "closed-pilot terms are too long")
-    if COHORT_ID.fullmatch(env[COHORT_SETTING].strip()) is None:
+    if COHORT_ID.fullmatch(env[COHORT_SETTING]) is None:
         raise ProviderError("RX pilot", "invalid closed-pilot cohort")
     if env.get("TRACKER_AI_DISABLED") != "1":
         limit = env["TRACKER_AI_DAILY_CALLS"]
@@ -109,11 +109,12 @@ def closed_config(env, *, forbid_bot=None, forbid_data=None):
         resolved, forbidden = data.resolve(), Path(forbid_data).resolve()
         if resolved == forbidden or resolved.is_relative_to(forbidden) or forbidden.is_relative_to(resolved):
             raise ProviderError("RX pilot", "this data directory overlaps the personal environment")
-    return {"cohort": env[COHORT_SETTING].strip(), "admitted": len(set(admitted)),
+    report_config(env)
+    return {"cohort": env[COHORT_SETTING], "admitted": len(set(admitted)),
             "ai": "disabled" if env.get("TRACKER_AI_DISABLED") == "1" else "limited"}
 
 
-def local_database(path, *, now=None, max_queue_age=900, expect_restored=False):
+def local_database(path, *, now=None, max_queue_age=900, expect_restored=False, expected_cohort=None):
     """Read an isolated SQLite volume and fail closed on live data or stale work."""
     path = Path(path)
     if max_queue_age <= 0:
@@ -135,6 +136,10 @@ def local_database(path, *, now=None, max_queue_age=900, expect_restored=False):
             live += db.execute("SELECT COUNT(*) FROM school_cohorts WHERE demo=0").fetchone()[0]
         if live:
             raise ProviderError("RX pilot", "isolated database contains live commercial records")
+        if expected_cohort is not None and ("school_cohorts" not in tables or not db.execute(
+            "SELECT 1 FROM school_cohorts WHERE id=? AND demo=1", (expected_cohort,)
+        ).fetchone()):
+            raise ProviderError("RX pilot", "configured training cohort is missing in the isolated database")
         queued = []
         pending = 0
         for table in ("deferred_inbox", "event_writes"):
@@ -213,13 +218,14 @@ def main():
     args = parser.parse_args()
     try:
         if args.closed:
-            closed_config(os.environ, forbid_bot=args.forbid_bot, forbid_data=args.forbid_data_dir)
+            config = closed_config(os.environ, forbid_bot=args.forbid_bot, forbid_data=args.forbid_data_dir)
             if args.database is None:
                 raise ProviderError("RX pilot", "--database is required for the closed-pilot check")
-            if args.database.resolve() != (Path(os.environ["TRACKER_DATA_DIR"]) / "bot.sqlite").resolve():
+            expected_database = Path(os.environ["TRACKER_DATA_DIR"]).resolve() / "bot.sqlite"
+            if args.database.resolve() != expected_database:
                 raise ProviderError("RX pilot", "--database must be bot.sqlite in TRACKER_DATA_DIR")
             state = local_database(args.database, max_queue_age=args.max_queue_age,
-                                   expect_restored=args.expect_restored)
+                                   expect_restored=args.expect_restored, expected_cohort=config["cohort"])
         elif args.local_only or args.database or args.forbid_data_dir or args.expect_restored:
             raise ProviderError("RX pilot", "local rehearsal options require --closed")
         if not args.local_only:
