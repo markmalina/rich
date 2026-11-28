@@ -10,8 +10,9 @@ from unittest.mock import Mock
 from .coaching import Coaching
 from .demo_checkout import DemoCheckout
 from .ledger import MOSCOW
-from .main import Bot
+from .main import ADMISSION_REQUIRED, ADMISSION_SETTING, Bot, private_admission
 from .operations import Operations
+from .providers import ProviderError
 from .sales import Sales
 
 
@@ -53,6 +54,29 @@ class DemoCheckoutTest(unittest.TestCase):
                     if row[0]["text"] == text)
         self.callback(user, data)
         return data
+
+    def test_closed_intake_blocks_qr_and_previous_checkout_button(self):
+        self.bot.admitted = frozenset({7, 8})
+        self.message(8, "/start tracking_GR020010")
+        button = self.click_label(8, "Оплатить")
+        self.assertTrue(button.startswith("dp:"))
+        confirm = self.screen()["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+        self.bot.admitted = frozenset({7})
+        self.callback(8, confirm)
+        self.assertIn(ADMISSION_REQUIRED, self.tg.api.call_args.args[1]["text"])
+        self.message(9, "/start tracking_GR020011")
+        self.assertEqual(self.tg.message.call_args.args, (9, ADMISSION_REQUIRED))
+        self.assertEqual(self.db.execute("SELECT buyer,state FROM pilot_orders").fetchall(), [(8, "awaiting")])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(), (0,))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_kits").fetchone(), (0,))
+
+    def test_closed_configuration_distinguishes_empty_and_invalid(self):
+        self.assertIsNone(private_admission({}))
+        self.assertEqual(private_admission({ADMISSION_SETTING: "[]"}), frozenset())
+        self.assertEqual(private_admission({ADMISSION_SETTING: "[8, 9, 8]"}), {8, 9})
+        for invalid in ("", "null", "8", "[true]", '["8"]', "[-1]", "[9223372036854775808]"):
+            with self.subTest(invalid=invalid), self.assertRaises(ProviderError):
+                private_admission({ADMISSION_SETTING: invalid})
 
     def test_printed_jar_to_tracking_and_private_practice(self):
         self.message(8, "/start tracking_GR020010")

@@ -135,6 +135,17 @@ class CoachingTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT DISTINCT day FROM coach_notices").fetchall(),
                          [("2026-11-27",)])
 
+    def test_reminders_require_admission_of_client_and_tracker_in_closed_worker(self):
+        self.pair()
+        self.cmd(8, "/coach_reminder 1 20:00")
+        self.telegram.reset_mock()
+        self.app.send_due(self.now.replace(hour=21), admitted={7})
+        self.app.send_due(self.now.replace(hour=21), admitted={8})
+        self.telegram.message.assert_not_called()
+        self.app.send_due(self.now.replace(hour=21), admitted={7, 8})
+        self.telegram.message.assert_called_once()
+        self.assertEqual(self.telegram.message.call_args.args[0], 8)
+
     def test_reporting_without_minimum_counts_an_honest_no_and_uses_actual_share_time(self):
         link = self.pair(criterion="отчёт")
         before = self.now.replace(hour=23, minute=59, second=59)

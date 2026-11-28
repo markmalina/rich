@@ -4,6 +4,7 @@
 """Private Life Tracker agreements and manually reconciled days."""
 
 import datetime as dt
+import json
 from decimal import Decimal
 import re
 from secrets import token_urlsafe
@@ -358,18 +359,23 @@ class Coaching:
         return (f"{start:%d.%m}–{finish:%d.%m} МСК. Активных дней: {len(obligations)} · {len(obligations)*100} ₽. "
                 f"Подтверждено: {confirmed} · {confirmed*100} ₽. {mode}")
 
-    def send_due(self, now):
+    def send_due(self, now, *, admitted=None):
         local = now.astimezone(MOSCOW)
         today = local.date().isoformat()
         rows = self.db.execute("""
             SELECT l.id, l.client FROM coach_links l
             WHERE l.state='active' AND l.reminder<=:clock
+              AND (:admitted IS NULL OR (
+                l.client IN (SELECT value FROM json_each(:admitted))
+                AND l.tracker IN (SELECT value FROM json_each(:admitted))
+              ))
               AND instr(',' || l.weekdays || ',', ',' || :weekday || ',') > 0
               AND (SELECT c.active FROM coach_calendar c WHERE c.link=l.id AND c.day<=:today
                    ORDER BY c.day DESC LIMIT 1) = 1
               AND NOT EXISTS (SELECT 1 FROM coach_notices n WHERE n.link=l.id AND n.day=:today)
             ORDER BY l.reminder, l.id LIMIT 25
-        """, {"clock": local.strftime("%H:%M"), "weekday": WEEK[local.weekday()], "today": today}).fetchall()
+        """, {"clock": local.strftime("%H:%M"), "weekday": WEEK[local.weekday()], "today": today,
+              "admitted": None if admitted is None else json.dumps(sorted(admitted))}).fetchall()
         for link, client in rows:
             with self.db:
                 sent = self.db.execute("INSERT OR IGNORE INTO coach_notices VALUES (?,?,'pending')", (link, today))
