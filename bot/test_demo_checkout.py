@@ -283,7 +283,8 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertRegex(rows[1][1], r"^demo-self:2:[0-9a-f]{32}$")
 
-    def test_private_referral_to_school_coaching_and_delivery_in_demo_mode(self):
+    def test_t36_t38_private_referral_four_demo_payments_and_delivery(self):
+        live_before = self.bot.pilot_orders.metrics(False, None)
         self.message(8, "/start tracking_GR020010")
         self.click_label(8, "Оплатить")
         self.click_label(8, "Я оплатил")
@@ -336,18 +337,23 @@ class DemoCheckoutTest(unittest.TestCase):
         self.message(8, "/pay")
         self.click_label(8, "Гранола #3 · 350 ₽")
         self.click_label(8, "Оплатить")
-        self.click_label(8, "Я оплатил")
+        confirm = self.click_label(8, "Я оплатил")
+        self.callback(8, confirm)
         self.assertIn("/pilot_delivery 3", self.screen()["text"])
         orders = self.db.execute(
-            "SELECT kind, demo, source, state FROM pilot_orders ORDER BY id"
+            "SELECT kind,total,demo,source,state FROM pilot_orders ORDER BY id"
         ).fetchall()
-        self.assertEqual(orders, [("tracking", 1, "GR020010", "paid"), ("package", 1, None, "paid"),
-                                  ("granola", 1, "GR020010", "paid")])
+        self.assertEqual(orders, [("tracking", 420000, 1, "GR020010", "paid"),
+                                  ("package", 990000, 1, None, "paid"),
+                                  ("granola", 35000, 1, "GR020010", "paid")])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(), (3,))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (1,))
+        self.assertEqual(self.db.execute("SELECT order_id,units,grams FROM pilot_kits ORDER BY order_id").fetchall(),
+                         [(1, 21, 80), (2, 21, 80)])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM school_work WHERE shared=1").fetchone(), (0,))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_marks").fetchone(), (0,))
         self.assertIn("Гранола: заявок 1, оплат 1", self.bot.pilot_orders.metrics(True, "GR020010"))
-        self.assertNotIn("оплат 1", self.bot.pilot_orders.metrics(False, None))
+        self.assertEqual(self.bot.pilot_orders.metrics(False, None), live_before)
 
     def test_no_bypass_to_cancelled_live_foreign_or_group_order(self):
         self.message(8, "/start tracking")
