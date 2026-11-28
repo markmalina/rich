@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
 import tempfile
 from uuid import uuid4
 
@@ -31,6 +32,21 @@ CONSENT_EPOCH = "private_consent_epoch"
 
 def table_exists(db, name):
     return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def poll_status(path, now, max_age):
+    """Read the worker heartbeat without starting another Telegram poller."""
+    try:
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            row = db.execute("SELECT last_success FROM operational_poll WHERE id=1").fetchone()
+    except (OSError, sqlite3.Error):
+        return "poll_unavailable"
+    if row is None:
+        return "poll_waiting"
+    if type(row[0]) is not int:
+        return "poll_unavailable"
+    age = int(now.timestamp()) - row[0]
+    return "poll_ok" if 0 <= age <= max_age else "poll_stale"
 
 
 def copy_database(source, destination, *, overwrite=False, deletion_ledger=None, prepare=None):
@@ -138,6 +154,8 @@ def restore_database(source_path, destination, deletion_ledger_path, manifest, *
     current_context = read_database(current_ledger_path) if current_ledger_path is not None else nullcontext()
     with current_context as current, read_database(source_path) as source, read_database(deletion_ledger_path) as bundled:
         def prepare(target):
+            if table_exists(target, "operational_poll"):
+                target.execute("DELETE FROM operational_poll")
             if current is not None:
                 current.execute("SELECT user, recorded FROM erasures LIMIT 0")
                 apply_privacy(target, current)
@@ -190,6 +208,11 @@ class Operations:
                 )
             """)
             self.db.execute("CREATE TABLE IF NOT EXISTS operational_incidents(code TEXT PRIMARY KEY)")
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS operational_poll (
+                    id INTEGER PRIMARY KEY CHECK(id=1), last_success INTEGER NOT NULL
+                )
+            """)
         fd=os.open(self.ledger_path,os.O_WRONLY|os.O_CREAT,0o600)
         os.close(fd)
         self.ledger=sqlite3.connect(self.ledger_path)
@@ -293,6 +316,18 @@ class Operations:
         """,(self.owner,day)).fetchone()
         return f"{day} МСК. Уникальных платящих {people}. Оплаченных назначений {links}. У владельца {owner}."
 
+    def confirm_poll(self, now):
+        self.last_poll = now
+        try:
+            with self.db:
+                self.db.execute("""
+                    INSERT INTO operational_poll VALUES (1,?)
+                    ON CONFLICT(id) DO UPDATE SET last_success=excluded.last_success
+                    WHERE operational_poll.last_success<>excluded.last_success
+                """, (int(now.timestamp()),))
+        except sqlite3.Error as error:
+            logging.warning("Пульс опроса RX: %s", type(error).__name__)
+
     def oldest_queue(self, now):
         stamps = [self.db.execute(f"SELECT MIN(queued_at) FROM {table}").fetchone()[0]
                   for table in ("deferred_inbox", "event_writes") if table_exists(self.db, table)]
@@ -384,7 +419,21 @@ class Operations:
         return record
 
 
+def check_poll(argv):
+    parser = argparse.ArgumentParser(description="Read the eRex polling heartbeat.")
+    parser.add_argument("database", type=Path)
+    parser.add_argument("--max-age", type=int, default=120)
+    args = parser.parse_args(argv)
+    if args.max_age <= 0:
+        parser.error("--max-age must be positive")
+    result = poll_status(args.database, dt.datetime.now(MOSCOW), args.max_age)
+    print(result)
+    return int(result != "poll_ok")
+
+
 def main():
+    if sys.argv[1:2] == ["check-poll"]:
+        raise SystemExit(check_poll(sys.argv[2:]))
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source",type=Path)
     parser.add_argument("destination",type=Path)

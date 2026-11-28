@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from queue import Queue
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -15,7 +17,7 @@ from unittest.mock import Mock, patch
 from .coaching import Coaching
 from .ledger import MOSCOW
 from .main import Bot
-from .operations import (Operations, apply_privacy, copy_database, restore_database,
+from .operations import (Operations, apply_privacy, copy_database, poll_status, restore_database,
                          verify_snapshot_manifest, write_snapshot_manifest)
 from .providers import ProviderError
 from .sales import Sales
@@ -249,6 +251,56 @@ class OperationsTest(unittest.TestCase):
             self.addCleanup(restarted.ledger.close)
             restarted.check_alerts(self.now+dt.timedelta(minutes=2))
             self.assertEqual(self.tg.message.call_count,2)
+
+    def test_worker_heartbeat_advances_only_after_successful_telegram_poll(self):
+        bot = Bot(self.tg, None, None, self.root, 7)
+        self.addCleanup(bot.db.close)
+        bot.operations = Operations(bot.db, self.tg, 7, self.root)
+        self.addCleanup(bot.operations.ledger.close)
+        self.tg.api.side_effect = [[], ProviderError("Telegram", 503)]
+        with (patch.object(bot.operations, "confirm_poll", wraps=bot.operations.confirm_poll) as confirm,
+              patch.object(bot.operations, "run_daily"),
+              patch("bot.main.time.sleep", side_effect=KeyboardInterrupt),
+              self.assertRaises(KeyboardInterrupt)):
+            bot.run()
+        self.assertEqual(self.tg.api.call_count, 2)
+        confirm.assert_called_once()
+        confirmed_at = confirm.call_args.args[0]
+        self.assertEqual(poll_status(self.root / "bot.sqlite", confirmed_at, 120), "poll_ok")
+        self.assertEqual(poll_status(self.root / "bot.sqlite", confirmed_at + dt.timedelta(minutes=3), 120),
+                         "poll_stale")
+
+    def test_poll_heartbeat_is_observable_in_another_process_and_cleared_on_restore(self):
+        database = self.root / "main.sqlite"
+        now = dt.datetime.now(MOSCOW).replace(microsecond=0)
+
+        def inspect():
+            return subprocess.run(
+                [sys.executable, "-m", "bot.operations", "check-poll", str(database), "--max-age", "120"],
+                capture_output=True, text=True, check=False,
+            )
+
+        before = inspect()
+        self.assertEqual((before.returncode, before.stdout.strip()), (1, "poll_waiting"))
+        self.ops.confirm_poll(now)
+        fresh = inspect()
+        self.assertEqual((fresh.returncode, fresh.stdout.strip()), (0, "poll_ok"))
+        self.assertEqual(poll_status(database, now + dt.timedelta(seconds=120), 120), "poll_ok")
+        self.assertEqual(poll_status(database, now + dt.timedelta(seconds=121), 120), "poll_stale")
+        self.ops.confirm_poll(now - dt.timedelta(minutes=3))
+        stopped = inspect()
+        self.assertEqual((stopped.returncode, stopped.stdout.strip()), (1, "poll_stale"))
+        self.assertEqual(stopped.stderr, "")
+        missing = self.root / "absent.sqlite"
+        self.assertEqual(poll_status(missing, now, 120), "poll_unavailable")
+        self.assertFalse(missing.exists())
+
+        bundle = self.ops.snapshot(now.date())
+        restored = self.root / "recovered.sqlite"
+        journal = self.ops.storage / f"rx-{now.date()}-erasures.sqlite"
+        manifest = self.ops.storage / f"rx-{now.date()}.manifest.json"
+        restore_database(bundle, restored, journal, manifest)
+        self.assertEqual(poll_status(restored, now, 120), "poll_waiting")
 
     def test_network_counts_unique_payors_and_hides_demo(self):
         Coaching(self.db,self.tg,7)

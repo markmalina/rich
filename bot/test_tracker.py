@@ -13,6 +13,7 @@ from .event_write import EventWrite
 from .group_reports import build_report
 from .ledger import EVENT_FIELDS, INBOX_HEADERS, MOSCOW, QUERY_FIELDS, Clarification, action_catalog, ledger_rows, summarize_query
 from .main import EVENT_UNCONFIRMED, Bot, attachment
+from .operations import Operations
 from .providers import ProviderError, RecipientUnavailable, Telegram
 from .voice_check import VoiceCheck
 
@@ -306,6 +307,63 @@ class ReplayTest(unittest.TestCase):
         self.assertEqual(len(google.events), 2)
         self.assertIn("Записал в «БАЗУ».", telegram.message.call_args.args[1])
         model.plan.assert_called_once()
+
+    def test_operator_signal_for_incomplete_transfer_retries_and_clears_after_reconciliation(self):
+        google, telegram = FakeGoogle(), Mock()
+        model, message = self.set_up_transfer(google)
+        append = google.append
+        delayed = []
+
+        def lose_reply(area, rows):
+            if "События" in area:
+                delayed.extend(rows)
+                raise ProviderError("Apps Script", "connection")
+            return append(area, rows)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bot = Bot(telegram, google, model, root, 7)
+            self.addCleanup(bot.db.close)
+            ops = Operations(bot.db, telegram, 7, root, alerts=True)
+            self.addCleanup(ops.ledger.close)
+            with (patch.object(google, "append", side_effect=lose_reply) as outgoing,
+                  patch("bot.operations.shutil.disk_usage", return_value=SimpleNamespace(total=10**9, free=10**8))):
+                bot.handle(50, message, NOW)
+                self.assertIn("ещё проверяю", telegram.message.call_args.args[1])
+                with bot.db:
+                    bot.db.execute("UPDATE event_writes SET queued_at=?", (int(NOW.timestamp()),))
+                google.events.extend(delayed[:1])
+                age_14 = NOW + dt.timedelta(minutes=14)
+                with patch("bot.main.time.time", return_value=age_14.timestamp()):
+                    bot.reconcile_events(51)
+                self.assertTrue(bot.event_writes.find(7, 50).sent)
+                ops.check_alerts(age_14)
+                self.assertEqual(telegram.message.call_count, 1)
+
+                age_15 = NOW + dt.timedelta(minutes=15)
+                telegram.message.side_effect = [ProviderError("Telegram", 503), True]
+                with self.assertLogs(level="WARNING"):
+                    ops.check_alerts(age_15)
+                self.assertEqual(bot.db.execute("SELECT code FROM operational_incidents").fetchall(), [])
+                age_16 = NOW + dt.timedelta(minutes=16)
+                ops.check_alerts(age_16)
+                telegram.message.side_effect = None
+                self.assertEqual(telegram.message.call_args.args,
+                                 (7, "RX · эксплуатация. queue_stale. /pilot_health"))
+                self.assertIn("Самая старая: 16 мин", ops.health(age_16))
+                ops.check_alerts(age_16 + dt.timedelta(minutes=1))
+                self.assertEqual(telegram.message.call_count, 3)
+
+                google.events.extend(delayed[1:])
+                age_18 = NOW + dt.timedelta(minutes=18)
+                with patch("bot.main.time.time", return_value=age_18.timestamp()):
+                    bot.reconcile_events(51)
+                ops.check_alerts(age_18)
+                self.assertIsNone(bot.event_writes.find(7, 50))
+                self.assertEqual(bot.db.execute("SELECT code FROM operational_incidents").fetchall(), [])
+                self.assertIn("Записал в «БАЗУ».", telegram.message.call_args.args[1])
+                self.assertEqual(len(google.events), 2)
+                self.assertEqual(sum("События" in call.args[0] for call in outgoing.call_args_list), 1)
 
     def test_reconciled_event_does_not_retry_permanent_private_delivery_failure(self):
         google, telegram = FakeGoogle(), Mock()

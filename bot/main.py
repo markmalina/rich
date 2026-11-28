@@ -192,7 +192,7 @@ class Bot:
                     "offset": offset, "timeout": 25, "allowed_updates": update_types,
                 })
                 if self.operations is not None:
-                    self.operations.last_poll = dt.datetime.now(MOSCOW)
+                    self.operations.confirm_poll(dt.datetime.now(MOSCOW))
                 if first_poll:
                     logging.info("Telegram API: опрос обновлений подтверждён")
                     first_poll = False
