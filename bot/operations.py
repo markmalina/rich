@@ -5,6 +5,7 @@
 
 import argparse
 import datetime as dt
+import hashlib
 import io
 import json
 import logging
@@ -22,6 +23,7 @@ TABLES = {"pilot_orders", "school_enrolments", "pilot_kits", "pilot_stock", "pil
           "coach_links", "coach_payments", "deferred_inbox", "event_writes", "privacy_requests"}
 ALERT_INTERVAL = dt.timedelta(minutes=1)
 WARNING_QUEUE_SECONDS = 15 * 60
+SNAPSHOT_FORMAT = "rich-recovery-bundle-v1"
 
 
 def table_exists(db, name):
@@ -59,6 +61,76 @@ def copy_database(source, destination, *, overwrite=False, deletion_ledger=None)
             os.close(directory)
     finally:
         Path(tmp).unlink(missing_ok=True)
+
+
+def snapshot_evidence(path):
+    path = Path(path)
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+            raise RuntimeError("SQLite verification failed")
+        schema = "\n".join(row[0] or "" for row in db.execute(
+            "SELECT sql FROM sqlite_master ORDER BY type,name"
+        ))
+    finally:
+        db.close()
+    return {"file": path.name, "bytes": path.stat().st_size, "sha256": digest.hexdigest(),
+            "schema_sha256": hashlib.sha256(schema.encode()).hexdigest()}
+
+
+def write_snapshot_manifest(database, deletion_ledger, manifest, *, created=None):
+    manifest = Path(manifest)
+    manifest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    record = {"format": SNAPSHOT_FORMAT,
+              "created": (created or dt.datetime.now(MOSCOW)).isoformat(),
+              "database": snapshot_evidence(database),
+              "deletion_ledger": snapshot_evidence(deletion_ledger)}
+    fd, tmp = tempfile.mkstemp(dir=manifest.parent, prefix=".manifest-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(record, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp, manifest)
+        directory = os.open(manifest.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    return record
+
+
+def verify_snapshot_manifest(database, deletion_ledger, manifest):
+    try:
+        record = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("snapshot manifest is unreadable") from exc
+    if record.get("format") != SNAPSHOT_FORMAT:
+        raise RuntimeError("snapshot manifest format is unsupported")
+    for field, path in (("database", database), ("deletion_ledger", deletion_ledger)):
+        expected = record.get(field)
+        actual = snapshot_evidence(path)
+        evidence = ("bytes", "sha256", "schema_sha256")
+        if not isinstance(expected, dict) or any(expected.get(key) != actual[key] for key in evidence):
+            raise RuntimeError(f"snapshot manifest mismatch: {field}")
+    return record
+
+
+def restore_database(source_path, destination, deletion_ledger_path, manifest):
+    verify_snapshot_manifest(source_path, deletion_ledger_path, manifest)
+    source = sqlite3.connect(Path(source_path).resolve().as_uri() + "?mode=ro", uri=True)
+    ledger = sqlite3.connect(Path(deletion_ledger_path).resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        copy_database(source, destination, deletion_ledger=ledger)
+    finally:
+        source.close()
+        ledger.close()
 
 
 def apply_privacy(db, ledger):
@@ -110,8 +182,12 @@ class Operations:
 
     def snapshot(self, today, *, replace=False):
         filename=self.storage/f"rx-{today}.sqlite"
-        if not filename.exists() or replace:
-            copy_database(self.db,filename,overwrite=replace)
+        ledger=self.storage/f"rx-{today}-erasures.sqlite"
+        manifest=self.storage/f"rx-{today}.manifest.json"
+        if not filename.exists() or not ledger.exists() or not manifest.exists() or replace:
+            copy_database(self.db,filename,overwrite=filename.exists())
+            copy_database(self.ledger,ledger,overwrite=ledger.exists())
+            write_snapshot_manifest(filename,ledger,manifest)
         return filename
 
     def run_daily(self,now):
@@ -232,7 +308,7 @@ class Operations:
         info=f"Свободно на томе {disk.free//(1024*1024)} МиБ."
         if disk.free<max(32*1024*1024,disk.total//20):
             info+=" Мало места."
-        backups=list(self.storage.glob("rx-*.sqlite"))
+        backups=list(self.storage.glob("rx-????-??-??.sqlite"))
         latest=max((p.stem.removeprefix("rx-") for p in backups),default="ещё нет")
         age=self.oldest_queue(now)
         oldest=f" Самая старая: {age//60} мин." if age is not None else ""
@@ -283,16 +359,15 @@ def main():
     parser.add_argument("source",type=Path)
     parser.add_argument("destination",type=Path)
     parser.add_argument("--deletion-ledger",type=Path,required=True)
+    parser.add_argument("--manifest",type=Path,required=True)
     args=parser.parse_args()
-    if not args.source.is_file() or not args.deletion_ledger.is_file():
-        parser.error("source and deletion ledger must exist")
-    source=sqlite3.connect(args.source.resolve().as_uri()+"?mode=ro",uri=True)
-    ledger=sqlite3.connect(args.deletion_ledger.resolve().as_uri()+"?mode=ro",uri=True)
+    if not args.source.is_file() or not args.deletion_ledger.is_file() or not args.manifest.is_file():
+        parser.error("source, deletion ledger and manifest must exist")
     try:
-        copy_database(source,args.destination,deletion_ledger=ledger)
-    finally:
-        source.close()
-        ledger.close()
+        verify_snapshot_manifest(args.source,args.deletion_ledger,args.manifest)
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    restore_database(args.source,args.destination,args.deletion_ledger,args.manifest)
     print("SQLite: копия восстановлена, журнал удалений применён.")
 
 

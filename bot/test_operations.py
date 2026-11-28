@@ -13,7 +13,8 @@ from unittest.mock import Mock, patch
 
 from .coaching import Coaching
 from .ledger import MOSCOW
-from .operations import Operations, apply_privacy, copy_database
+from .operations import (Operations, apply_privacy, copy_database, restore_database,
+                         verify_snapshot_manifest, write_snapshot_manifest)
 from .providers import ProviderError
 from .sales import Sales
 
@@ -59,6 +60,10 @@ class OperationsTest(unittest.TestCase):
         self.assertIn("2026-11-26",self.ops.health())
         source=self.ops.snapshot(self.now.date())
         self.assertEqual(source.stat().st_mode & 0o777,0o600)
+        bundle_ledger=self.ops.storage/"rx-2026-11-26-erasures.sqlite"
+        bundle_manifest=self.ops.storage/"rx-2026-11-26.manifest.json"
+        evidence=verify_snapshot_manifest(source,bundle_ledger,bundle_manifest)
+        self.assertEqual(evidence["format"],"rich-recovery-bundle-v1")
         self.assertIn("нет",self.call(7,"/pilot_purge_school 8"))
         self.call(8,"/pilot_privacy school")
         self.assertIn("права",self.call(9,"/pilot_purge_school 8"))
@@ -80,6 +85,44 @@ class OperationsTest(unittest.TestCase):
         with self.db:
             apply_privacy(self.db,self.ops.ledger)
         self.assertIsNone(self.db.execute("SELECT resolved FROM privacy_requests WHERE user=8").fetchone()[0])
+
+    def test_manifest_rejects_changed_database_or_deletion_ledger(self):
+        source=self.ops.snapshot(self.now.date())
+        ledger=self.ops.storage/"rx-2026-11-26-erasures.sqlite"
+        manifest=self.ops.storage/"rx-2026-11-26.manifest.json"
+        verify_snapshot_manifest(source,ledger,manifest)
+
+        changed=self.root/"changed.sqlite"
+        changed.write_bytes(source.read_bytes()+b"changed")
+        with self.assertRaisesRegex(RuntimeError,"database"):
+            verify_snapshot_manifest(changed,ledger,manifest)
+
+        rebuilt=self.root/"rebuilt.manifest.json"
+        write_snapshot_manifest(source,ledger,rebuilt,created=self.now)
+        self.assertEqual(verify_snapshot_manifest(source,ledger,rebuilt)["created"],self.now.isoformat())
+
+    def test_manifested_bundle_restores_under_new_names_and_fails_closed(self):
+        order=self.enrol(8,"manifested")
+        self.call(8,f"/school_work {order} 1 | restorable")
+        source=self.ops.snapshot(self.now.date())
+        bundled_ledger=self.ops.storage/"rx-2026-11-26-erasures.sqlite"
+        manifest=self.ops.storage/"rx-2026-11-26.manifest.json"
+        external_source=self.root/"external-main.sqlite"
+        external_ledger=self.root/"external-erasures.sqlite"
+        external_source.write_bytes(source.read_bytes())
+        external_ledger.write_bytes(bundled_ledger.read_bytes())
+
+        restored=self.root/"restored-from-bundle.sqlite"
+        restore_database(external_source,restored,external_ledger,manifest)
+        check=sqlite3.connect(restored)
+        self.addCleanup(check.close)
+        self.assertEqual(check.execute("SELECT text FROM school_work").fetchone(),("restorable",))
+
+        external_source.write_bytes(external_source.read_bytes()+b"tampered")
+        rejected=self.root/"must-not-exist.sqlite"
+        with self.assertRaisesRegex(RuntimeError,"database"):
+            restore_database(external_source,rejected,external_ledger,manifest)
+        self.assertFalse(rejected.exists())
 
     def test_failed_restore_never_publishes_private_data_and_can_be_retried(self):
         order=self.enrol(8,"fixture")
