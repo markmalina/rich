@@ -5,9 +5,12 @@
 
 import argparse
 from contextlib import ExitStack
+import datetime as dt
 import json
 import os
+from pathlib import Path
 import re
+import sqlite3
 
 from .group_face import GroupFace, HEADER, TITLE
 from .group_telegram import configured_groups, verify_group_chats
@@ -18,6 +21,12 @@ BOT_USERNAME = "TRACKER_PILOT_BOT_USERNAME"
 GOOGLE_EMAIL = "TRACKER_PILOT_GOOGLE_EMAIL"
 PILOT_CONFIG_REQUIRED = (*PILOT_REQUIRED, BOT_USERNAME, GOOGLE_EMAIL)
 SCRIPT_SETTINGS = ("TRACKER_APPS_SCRIPT_URL", "TRACKER_APPS_SCRIPT_TOKEN")
+CLOSED_FLAGS = ("TRACKER_PILOT", "TRACKER_DEMO_CHECKOUT", "TRACKER_SCHOOL", "TRACKER_COACHING",
+                "TRACKER_FULFILLMENT", "TRACKER_OPERATIONS", "TRACKER_OPERATIONS_ALERTS")
+ADMISSION_SETTING = "TRACKER_PRIVATE_ADMISSION_IDS"
+TERMS_SETTING = "TRACKER_PRIVATE_TERMS"
+COHORT_SETTING = "TRACKER_SCHOOL_COHORT"
+COHORT_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}")
 
 
 def legacy_google_settings(env):
@@ -55,10 +64,118 @@ def verify_telegram(telegram, expected, *, inline=False, forbid=None):
     return result
 
 
+def closed_config(env, *, forbid_bot=None, forbid_data=None):
+    """Validate a closed demo worker without contacting Telegram, Google or OpenAI."""
+    required = ("TELEGRAM_BOT_TOKEN", "TRACKER_OWNER_ID", "TRACKER_DATA_DIR", *PILOT_CONFIG_REQUIRED,
+                ADMISSION_SETTING, TERMS_SETTING, COHORT_SETTING)
+    if env.get("TRACKER_AI_DISABLED") != "1":
+        required += ("OPENAI_API_KEY", "TRACKER_AI_DAILY_CALLS")
+    missing = [name for name in required if not env.get(name, "").strip()]
+    if missing:
+        raise ProviderError("RX pilot", "missing closed-pilot variables: " + ", ".join(missing))
+    disabled = [name for name in CLOSED_FLAGS if env.get(name) != "1"]
+    if disabled:
+        raise ProviderError("RX pilot", "closed-pilot flags must be 1: " + ", ".join(disabled))
+    if env.get("TRACKER_TELEGRAM_ONLY") == "1":
+        raise ProviderError("RX pilot", "TRACKER_TELEGRAM_ONLY conflicts with the closed pilot")
+    if env.get("TRACKER_COMMERCIAL_OPEN") == "1" or env.get("TRACKER_PILOT_SELLER", "").strip():
+        raise ProviderError("RX pilot", "commercial checkout must be disabled for the closed pilot")
+    try:
+        owner = int(env["TRACKER_OWNER_ID"])
+        admitted = json.loads(env[ADMISSION_SETTING])
+    except (ValueError, TypeError):
+        raise ProviderError("RX pilot", "invalid closed-pilot owner or admission configuration") from None
+    if owner <= 0 or (not isinstance(admitted, list)
+                      or any(type(user) is not int or not 0 < user < 2**63 for user in admitted)):
+        raise ProviderError("RX pilot", "invalid closed-pilot owner or admission configuration")
+    terms = env[TERMS_SETTING].strip()
+    if len(terms) > 3000:
+        raise ProviderError("RX pilot", "closed-pilot terms are too long")
+    if COHORT_ID.fullmatch(env[COHORT_SETTING].strip()) is None:
+        raise ProviderError("RX pilot", "invalid closed-pilot cohort")
+    if env.get("TRACKER_AI_DISABLED") != "1":
+        limit = env["TRACKER_AI_DAILY_CALLS"]
+        if re.fullmatch(r"[1-9][0-9]{0,6}", limit) is None:
+            raise ProviderError("RX pilot", "closed pilot requires a positive daily AI limit")
+    expected_bot = env[BOT_USERNAME].strip().removeprefix("@").casefold()
+    if re.fullmatch(r"[a-z0-9_]{5,32}", expected_bot) is None:
+        raise ProviderError("RX pilot", f"invalid {BOT_USERNAME}")
+    if forbid_bot is not None and expected_bot == forbid_bot.strip().removeprefix("@").casefold():
+        raise ProviderError("RX pilot", "this bot is reserved for the personal environment")
+    data = Path(env["TRACKER_DATA_DIR"])
+    if not data.is_absolute():
+        raise ProviderError("RX pilot", "TRACKER_DATA_DIR must be an absolute isolated path")
+    if forbid_data is not None:
+        resolved, forbidden = data.resolve(), Path(forbid_data).resolve()
+        if resolved == forbidden or resolved.is_relative_to(forbidden) or forbidden.is_relative_to(resolved):
+            raise ProviderError("RX pilot", "this data directory overlaps the personal environment")
+    return {"cohort": env[COHORT_SETTING].strip(), "admitted": len(set(admitted)),
+            "ai": "disabled" if env.get("TRACKER_AI_DISABLED") == "1" else "limited"}
+
+
+def local_database(path, *, now=None, max_queue_age=900, expect_restored=False):
+    """Read an isolated SQLite volume and fail closed on live data or stale work."""
+    path = Path(path)
+    if max_queue_age <= 0:
+        raise ProviderError("RX pilot", "max queue age must be positive")
+    try:
+        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+    except (OSError, sqlite3.Error):
+        raise ProviderError("RX pilot", "isolated database is unavailable") from None
+    try:
+        if db.execute("PRAGMA quick_check").fetchone() != ("ok",):
+            raise ProviderError("RX pilot", "isolated database failed integrity check")
+        tables = {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        required = {"state", "deferred_inbox", "event_writes", "pilot_orders", "coach_links"}
+        if not required <= tables:
+            raise ProviderError("RX pilot", "isolated database has an incomplete pilot schema")
+        live = db.execute("SELECT COUNT(*) FROM pilot_orders WHERE demo=0").fetchone()[0]
+        live += db.execute("SELECT COUNT(*) FROM coach_links WHERE demo=0").fetchone()[0]
+        if "school_cohorts" in tables:
+            live += db.execute("SELECT COUNT(*) FROM school_cohorts WHERE demo=0").fetchone()[0]
+        if live:
+            raise ProviderError("RX pilot", "isolated database contains live commercial records")
+        queued = []
+        pending = 0
+        for table in ("deferred_inbox", "event_writes"):
+            stamp = db.execute(f"SELECT MIN(queued_at) FROM {table}").fetchone()[0]
+            pending += db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            if stamp is not None:
+                queued.append(stamp)
+        current = now or dt.datetime.now(dt.timezone.utc)
+        age = max(0, int(current.timestamp()) - min(queued)) if queued else None
+        if age is not None and age >= max_queue_age:
+            raise ProviderError("RX pilot", "isolated database has a stale queue")
+        poll = "poll_waiting"
+        if "operational_poll" in tables:
+            row = db.execute("SELECT last_success FROM operational_poll WHERE id=1").fetchone()
+            if row is not None:
+                poll_age = int(current.timestamp()) - row[0] if type(row[0]) is int else max_queue_age + 1
+                poll = "poll_ok" if 0 <= poll_age <= max_queue_age else "poll_stale"
+        if poll == "poll_stale":
+            raise ProviderError("RX pilot", "isolated database has a stale Telegram heartbeat")
+        if expect_restored:
+            if poll != "poll_waiting":
+                raise ProviderError("RX pilot", "restored database already contains a polling heartbeat")
+            if "private_consents" not in tables:
+                raise ProviderError("RX pilot", "restored database has no private consent ledger")
+            active = db.execute("SELECT COUNT(*) FROM private_consents WHERE version IS NOT NULL").fetchone()[0]
+            if active:
+                raise ProviderError("RX pilot", "restored database revived private consent")
+        return {"integrity": "ok", "queue": pending, "oldest_seconds": age, "poll": poll,
+                "mode": "demo-only"}
+    except sqlite3.Error:
+        raise ProviderError("RX pilot", "isolated database cannot be verified") from None
+    finally:
+        db.close()
+
+
 def check(env, forbid=None):
     if env.get("TRACKER_TELEGRAM_ONLY") == "1":
         raise ProviderError("RX pilot", "TRACKER_TELEGRAM_ONLY conflicts with the pilot")
-    required = ("TELEGRAM_BOT_TOKEN", "OPENAI_API_KEY", "TRACKER_DATA_DIR", *PILOT_CONFIG_REQUIRED)
+    required = ("TELEGRAM_BOT_TOKEN", "TRACKER_DATA_DIR", *PILOT_CONFIG_REQUIRED)
+    if env.get("TRACKER_AI_DISABLED") != "1":
+        required += ("OPENAI_API_KEY",)
     if env.get("TRACKER_OWNER_ID"):
         required += ("TRACKER_SPREADSHEET_ID", *legacy_google_settings(env))
     missing = [key for key in required if not env.get(key, "").strip()]
@@ -87,15 +204,36 @@ def check(env, forbid=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--forbid-bot", metavar="USERNAME", help="Reject the personal bot during a test setup")
+    parser.add_argument("--closed", action="store_true", help="Validate fail-closed settings for a training cohort")
+    parser.add_argument("--local-only", action="store_true", help="Skip remote read-only checks during rehearsal")
+    parser.add_argument("--database", type=Path, help="Read the isolated bot.sqlite before launch")
+    parser.add_argument("--forbid-data-dir", type=Path, help="Reject the personal worker data directory")
+    parser.add_argument("--expect-restored", action="store_true", help="Require a restored DB with cleared consent and poll")
+    parser.add_argument("--max-queue-age", type=int, default=900)
     args = parser.parse_args()
     try:
-        check(os.environ, args.forbid_bot)
+        if args.closed:
+            closed_config(os.environ, forbid_bot=args.forbid_bot, forbid_data=args.forbid_data_dir)
+            if args.database is None:
+                raise ProviderError("RX pilot", "--database is required for the closed-pilot check")
+            if args.database.resolve() != (Path(os.environ["TRACKER_DATA_DIR"]) / "bot.sqlite").resolve():
+                raise ProviderError("RX pilot", "--database must be bot.sqlite in TRACKER_DATA_DIR")
+            state = local_database(args.database, max_queue_age=args.max_queue_age,
+                                   expect_restored=args.expect_restored)
+        elif args.local_only or args.database or args.forbid_data_dir or args.expect_restored:
+            raise ProviderError("RX pilot", "local rehearsal options require --closed")
+        if not args.local_only:
+            check(os.environ, args.forbid_bot)
     except ProviderError as error:
         parser.exit(1, f"{error}\n")
     except (ValueError, KeyError, TypeError, AttributeError, ImportError) as error:
         parser.exit(1, f"RX pilot: {type(error).__name__}\n")
-    print("Проверены Telegram, Google OAuth, права на реестр и настроенные группы с Face.")
-    print("Запись двух тестовых пользователей и общий таймер Apps Script проверяются отдельно.")
+    if args.closed:
+        print(f"Закрытый учебный контур: настройки безопасны, SQLite {state['integrity']}, "
+              f"режим {state['mode']}, очередь {state['queue']}, опрос {state['poll']}.")
+    if not args.local_only:
+        print("Проверены Telegram, Google OAuth, права на реестр и настроенные группы с Face.")
+        print("Запись двух тестовых пользователей и общий таймер Apps Script проверяются отдельно.")
 
 
 if __name__ == "__main__":

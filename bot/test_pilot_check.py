@@ -1,11 +1,19 @@
 # SPDX-FileCopyrightText: 2026 System Rich contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 
+import datetime as dt
+from contextlib import redirect_stdout
+from io import StringIO
+import os
+from pathlib import Path
+import sqlite3
+import sys
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
 from .onboarding import DRIVE_ABOUT_URL, DRIVE_URL, REGISTRY_HEADERS, SHEET_MIME, PilotProvisioner
-from .pilot_check import check, verify_telegram
+from .pilot_check import closed_config, check, local_database, main, verify_telegram
 from .providers import ProviderError
 
 
@@ -67,3 +75,93 @@ class GooglePreflightTest(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "missing variables.*TRACKER_PILOT_BOT_USERNAME") as raised:
             check({"TELEGRAM_BOT_TOKEN": "never-print-this"})
         self.assertNotIn("never-print-this", str(raised.exception))
+
+
+class ClosedPilotPreflightTest(unittest.TestCase):
+    def setUp(self):
+        self.root = TemporaryDirectory()
+        self.addCleanup(self.root.cleanup)
+        self.data = Path(self.root.name) / "closed"
+        self.env = {
+            "TELEGRAM_BOT_TOKEN": "synthetic-token", "TRACKER_OWNER_ID": "7",
+            "TRACKER_DATA_DIR": str(self.data), "TRACKER_OAUTH_CLIENT_ID": "client",
+            "TRACKER_OAUTH_CLIENT_SECRET": "secret", "TRACKER_OAUTH_REFRESH_TOKEN": "refresh",
+            "TRACKER_PILOT_REGISTRY_ID": "registry", "TRACKER_PILOT_BOT_USERNAME": "ClosedPilotBot",
+            "TRACKER_PILOT_GOOGLE_EMAIL": "pilot@example.invalid", "TRACKER_PRIVATE_ADMISSION_IDS": "[]",
+            "TRACKER_PRIVATE_TERMS": "Учебные условия v1", "TRACKER_SCHOOL_COHORT": "first-2026",
+            "TRACKER_AI_DISABLED": "1",
+            **{name: "1" for name in ("TRACKER_PILOT", "TRACKER_DEMO_CHECKOUT", "TRACKER_SCHOOL",
+                                       "TRACKER_COACHING", "TRACKER_FULFILLMENT", "TRACKER_OPERATIONS",
+                                       "TRACKER_OPERATIONS_ALERTS")},
+        }
+
+    def database(self):
+        path = self.data / "bot.sqlite"
+        path.parent.mkdir()
+        db = sqlite3.connect(path)
+        db.executescript("""
+            CREATE TABLE state(key TEXT PRIMARY KEY,value TEXT);
+            CREATE TABLE deferred_inbox(update_id INTEGER,user INTEGER,received TEXT,payload TEXT,queued_at INTEGER);
+            CREATE TABLE event_writes(user INTEGER,origin TEXT,queued_at INTEGER);
+            CREATE TABLE pilot_orders(id INTEGER PRIMARY KEY,demo INTEGER);
+            CREATE TABLE coach_links(id INTEGER PRIMARY KEY,demo INTEGER);
+            CREATE TABLE private_consents(user INTEGER PRIMARY KEY,version TEXT);
+            CREATE TABLE operational_poll(id INTEGER PRIMARY KEY,last_success INTEGER);
+        """)
+        db.commit()
+        db.close()
+        return path
+
+    def test_safe_demo_config_and_restored_database_are_ready_without_remote_calls(self):
+        config = closed_config(self.env, forbid_bot="PersonalBot", forbid_data=Path(self.root.name) / "personal")
+        self.assertEqual(config, {"cohort": "first-2026", "admitted": 0, "ai": "disabled"})
+        state = local_database(self.database(), now=dt.datetime(2026, 11, 28, tzinfo=dt.timezone.utc),
+                               expect_restored=True)
+        self.assertEqual(state["integrity"], "ok")
+        self.assertEqual(state["mode"], "demo-only")
+        self.assertEqual(state["poll"], "poll_waiting")
+
+    def test_local_cli_reports_only_aggregate_readiness(self):
+        path = self.database()
+        output = StringIO()
+        argv = ["pilot_check", "--closed", "--local-only", "--database", str(path), "--expect-restored",
+                "--forbid-bot", "PersonalBot", "--forbid-data-dir", str(Path(self.root.name) / "personal")]
+        with patch.dict(os.environ, self.env, clear=True), patch.object(sys, "argv", argv), redirect_stdout(output):
+            main()
+        self.assertEqual(output.getvalue(),
+                         "Закрытый учебный контур: настройки безопасны, SQLite ok, "
+                         "режим demo-only, очередь 0, опрос poll_waiting.\n")
+
+    def test_rejects_personal_resources_commercial_mode_and_unlimited_ai(self):
+        with self.assertRaisesRegex(ProviderError, "reserved for the personal environment"):
+            closed_config(self.env, forbid_bot="closedpilotbot")
+        with self.assertRaisesRegex(ProviderError, "overlaps the personal environment"):
+            closed_config(self.env, forbid_data=self.data)
+        with self.assertRaisesRegex(ProviderError, "overlaps the personal environment"):
+            closed_config(self.env, forbid_data=Path(self.root.name))
+        unsafe = {**self.env, "TRACKER_COMMERCIAL_OPEN": "1"}
+        with self.assertRaisesRegex(ProviderError, "commercial checkout"):
+            closed_config(unsafe)
+        unlimited = {**self.env, "TRACKER_AI_DISABLED": "0", "OPENAI_API_KEY": "synthetic"}
+        with self.assertRaisesRegex(ProviderError, "TRACKER_AI_DAILY_CALLS"):
+            closed_config(unlimited)
+
+    def test_rejects_live_records_stale_queue_and_revived_consent(self):
+        path = self.database()
+        now = dt.datetime(2026, 11, 28, 12, tzinfo=dt.timezone.utc)
+        db = sqlite3.connect(path)
+        with db:
+            db.execute("INSERT INTO pilot_orders VALUES (1,0)")
+        with self.assertRaisesRegex(ProviderError, "live commercial records"):
+            local_database(path, now=now, expect_restored=True)
+        with db:
+            db.execute("DELETE FROM pilot_orders")
+            db.execute("INSERT INTO deferred_inbox VALUES (1,8,'x','{}',?)", (int(now.timestamp()) - 901,))
+        with self.assertRaisesRegex(ProviderError, "stale queue"):
+            local_database(path, now=now, expect_restored=True)
+        with db:
+            db.execute("DELETE FROM deferred_inbox")
+            db.execute("INSERT INTO private_consents VALUES (8,'v1')")
+        db.close()
+        with self.assertRaisesRegex(ProviderError, "revived private consent"):
+            local_database(path, now=now, expect_restored=True)
