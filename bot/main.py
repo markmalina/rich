@@ -237,6 +237,11 @@ class Bot:
         return self.db.execute("SELECT 1 FROM private_consents WHERE user=? AND version=?",
                                (user, self.terms_version)).fetchone() is not None
 
+    def private_access_version(self, user):
+        if not self.has_private_access(user):
+            return None
+        return self.terms_version or "open"
+
     def show_terms(self, user):
         self.telegram.message(user, f"{self.terms}\n\nПринять: /pilot_consent {self.terms_version}\n"
                                     "Отозвать: /pilot_withdraw")
@@ -738,8 +743,6 @@ def main():
     terms = os.environ.get(TERMS_SETTING)
     if (admitted is None) != (terms is None) or (terms is not None and (not terms.strip() or len(terms) > 3000)):
         raise ProviderError("RX pilot", "private admission requires a non-empty terms notice")
-    if admitted is not None and groups:
-        raise ProviderError("RX pilot", "private admission mode requires a private-only worker")
     google_settings = legacy_google_settings(os.environ)
     required = list(REQUIRED)
     if pilot:
@@ -795,7 +798,8 @@ def main():
             bot.ai_quota = AIQuota(bot.db, limit)
         demo_checkout = os.environ.get("TRACKER_DEMO_CHECKOUT") == "1"
         if os.environ.get("TRACKER_COACHING") == "1":
-            bot.coaching = Coaching(bot.db, telegram, bot.owner, demo_only=demo_checkout)
+            bot.coaching = Coaching(bot.db, telegram, bot.owner, demo_only=demo_checkout,
+                                    admitted=bot.has_private_access)
         if os.environ.get("TRACKER_SCHOOL") == "1":
             seller = (os.environ.get("TRACKER_PILOT_SELLER", "").strip()
                       if not demo_checkout and os.environ.get("TRACKER_COMMERCIAL_OPEN") == "1" else None)
@@ -822,7 +826,8 @@ def main():
                                                   face_tokens[str(chat)]), chat, group.face)
                     for chat, group in groups.items() if group.face
                 }
-                grouped = GroupTelegram(telegram, account, bot.db, groups, bot.registered_sheet, faces)
+                grouped = GroupTelegram(telegram, account, bot.db, groups, bot.registered_sheet, faces,
+                                        admission=bot.private_access_version)
                 grouped.verify_groups()
                 bot.groups = grouped
             except ProviderError as error:

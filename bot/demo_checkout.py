@@ -129,11 +129,12 @@ class DemoCheckout:
         today = now.astimezone(MOSCOW).date()
         if self.coaching is not None:
             links = self.db.execute("""
-                SELECT id,weekdays FROM coach_links
+                SELECT id,weekdays,tracker FROM coach_links
                 WHERE client=? AND state='active' AND demo=1 ORDER BY id DESC LIMIT 10
             """, (user,))
             buttons.extend((f"Оплатить день у трекера #{link} · 100 ₽", f"coachpay:{link}:{today:%Y%m%d}")
-                           for link, weekdays in links if self.coaching.active_on(link, today, weekdays))
+                           for link, weekdays, tracker in links
+                           if self.coaching.admits(tracker) and self.coaching.active_on(link, today, weekdays))
         return Screen(f"Выбери, что хочешь проверить.\n{NOTICE}", tuple(buttons))
 
     def tracking_offer(self):
@@ -212,7 +213,7 @@ class DemoCheckout:
         row = self.db.execute("""
             SELECT tracker,weekdays FROM coach_links WHERE id=? AND client=? AND state='active' AND demo=1
         """, (link, user)).fetchone()
-        if not row or not self.coaching.active_on(link, today, row[1]):
+        if not row or not self.coaching.admits(row[0]) or not self.coaching.active_on(link, today, row[1]):
             raise Clarification("Доступного учебного дня в этой связи нет.")
         if confirmed:
             self.db.execute("INSERT INTO coach_payments VALUES (?,?,?,?,?) ON CONFLICT(link,day) DO NOTHING",

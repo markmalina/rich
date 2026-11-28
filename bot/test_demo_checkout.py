@@ -25,7 +25,8 @@ class DemoCheckoutTest(unittest.TestCase):
         self.db = self.bot.db
         self.addCleanup(self.db.close)
         self.bot.pilot_orders = Sales(self.db, self.tg, 7)
-        self.bot.coaching = Coaching(self.db, self.tg, 7, demo_only=True)
+        self.bot.coaching = Coaching(self.db, self.tg, 7, demo_only=True,
+                                     admitted=self.bot.has_private_access)
         self.bot.demo_checkout = DemoCheckout(self.db, self.tg, self.bot.pilot_orders, self.bot.coaching)
         self.update = 0
         self.now = dt.datetime(2026, 11, 27, 20, 0, tzinfo=MOSCOW)
@@ -69,6 +70,27 @@ class DemoCheckoutTest(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT buyer,state FROM pilot_orders").fetchall(), [(8, "awaiting")])
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_receipts").fetchone(), (0,))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM pilot_kits").fetchone(), (0,))
+
+    def test_revoked_tracker_hides_and_rejects_previous_day_button(self):
+        self.bot.admitted = frozenset({7, 8, 9})
+        self.message(7, "/coach_allow 9")
+        self.message(9, "/coach_invite demo")
+        code = self.tg.message.call_args.args[1].split()[-1]
+        self.message(8, f"/coach_join {code}")
+        self.message(8, "/coach_plan 1 | движение | отчёт | пн,вт,ср,чт,пт,сб,вс | 5 мин | 20:00–21:00")
+        self.message(8, "/coach_share_plan 1")
+        self.message(9, "/coach_accept 1")
+        self.message(8, "/pay")
+        stale = next(row[0]["callback_data"] for row in self.screen()["reply_markup"]["inline_keyboard"]
+                     if "Оплатить день" in row[0]["text"])
+
+        self.bot.admitted = frozenset({7, 8})
+        self.message(8, "/pay")
+        self.assertFalse(any("Оплатить день" in row[0]["text"]
+                             for row in self.screen()["reply_markup"]["inline_keyboard"]))
+        self.callback(8, stale)
+        self.assertIn("нет", self.tg.api.call_args.args[1]["text"])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM coach_payments").fetchone(), (0,))
 
     def test_closed_configuration_distinguishes_empty_and_invalid(self):
         self.assertIsNone(private_admission({}))

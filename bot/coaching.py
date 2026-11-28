@@ -39,11 +39,12 @@ HELP = """Личное сопровождение в eRex
 
 
 class Coaching:
-    def __init__(self, db, telegram, owner, *, demo_only=False):
+    def __init__(self, db, telegram, owner, *, demo_only=False, admitted=None):
         self.db = db
         self.telegram = telegram
         self.owner = owner
         self.demo_only = demo_only
+        self._admitted = admitted
         db.executescript("""
             CREATE TABLE IF NOT EXISTS coach_roles (user INTEGER PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS coach_invites (
@@ -86,6 +87,9 @@ class Coaching:
                 update_id INTEGER PRIMARY KEY, user INTEGER NOT NULL, response TEXT NOT NULL
             );
         """)
+
+    def admits(self, user):
+        return self._admitted is None or self._admitted(user)
 
     def handle(self, update_id, user, message, received):
         raw = message.get("text", "").strip()
@@ -145,6 +149,8 @@ class Coaching:
             if not invite or dt.datetime.fromisoformat(invite[1]) <= now or invite[0] == user:
                 raise Clarification("Приглашение недействительно. Возьми новое у трекера.")
             tracker, _, demo = invite
+            if not self.admits(tracker):
+                raise Clarification("Трекер сейчас вне закрытого потока. Возьми новое приглашение после восстановления допуска.")
             if self.demo_only and not demo:
                 raise Clarification("Сейчас доступны учебные приглашения. Возьми новое у трекера.")
             existing = self.db.execute("""
@@ -172,6 +178,10 @@ class Coaching:
             raise Clarification("Связь не найдена.")
         client, tracker, state, demo, practice, minimum, weekdays, fallback, window, _ = row
         is_client = user == client
+        counterparty = tracker if is_client else client
+        if (not self.admits(counterparty)
+                and not (is_client and command in {"/coach_end", "/coach_view", "/coach_days"})):
+            raise Clarification("Связь приостановлена: второй участник сейчас вне закрытого потока.")
         if command == "/coach_end" and is_client:
             self.db.execute("UPDATE coach_links SET state='ended',reminder=NULL WHERE id=?", (link,))
             self.schedule(link, today+STEP, False)
