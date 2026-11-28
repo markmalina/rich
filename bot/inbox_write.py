@@ -50,6 +50,7 @@ class InboxWrites:
                 payload TEXT NOT NULL, queued_at INTEGER NOT NULL, next_check INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS deferred_inbox_by_user ON deferred_inbox (user, update_id);
+            CREATE TABLE IF NOT EXISTS deferred_onboarding (update_id INTEGER PRIMARY KEY);
         """)
 
     def capture(self, sheets, row):
@@ -84,12 +85,21 @@ class InboxWrites:
     def waiting(self, user):
         return self.db.execute("SELECT 1 FROM deferred_inbox WHERE user=? LIMIT 1", (user,)).fetchone() is not None
 
-    def defer(self, update_id, user, message, received):
+    def defer(self, update_id, user, message, received, *, onboarding=False):
         with self.db:
             self.db.execute("""
                 INSERT OR IGNORE INTO deferred_inbox (update_id, user, received, payload, queued_at)
                 VALUES (?, ?, ?, ?, CAST(strftime('%s','now') AS INTEGER))
             """, (update_id, user, received.isoformat(), json.dumps(message_payload(message))))
+            if onboarding:
+                self.db.execute("INSERT OR IGNORE INTO deferred_onboarding VALUES (?)", (update_id,))
+
+    def needs_onboarding(self, update_id):
+        return self.db.execute("SELECT 1 FROM deferred_onboarding WHERE update_id=?", (update_id,)).fetchone() is not None
+
+    def finish_onboarding(self, update_id):
+        with self.db:
+            self.db.execute("DELETE FROM deferred_onboarding WHERE update_id=?", (update_id,))
 
     def due(self, offset, now):
         return self.db.execute("""
@@ -108,3 +118,4 @@ class InboxWrites:
     def finish(self, update_id):
         with self.db:
             self.db.execute("DELETE FROM deferred_inbox WHERE update_id=?", (update_id,))
+            self.db.execute("DELETE FROM deferred_onboarding WHERE update_id=?", (update_id,))

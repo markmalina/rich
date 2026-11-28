@@ -156,6 +156,87 @@ def membership(update, user, status):
 
 
 class PilotAcceptanceTest(unittest.TestCase):
+    def test_closed_participant_first_records_survive_provision_failure_and_restart(self):
+        google, telegram = PilotGoogle(), PilotTelegram()
+        attempts = 0
+
+        def request(session, provider, method, url, **kwargs):
+            nonlocal attempts
+            if url == DRIVE_URL and method == "POST":
+                attempts += 1
+                if attempts == 1:
+                    raise ProviderError("Google pilot", 429)
+            return google.request(session, provider, method, url, **kwargs)
+
+        with (tempfile.TemporaryDirectory() as directory,
+              patch("bot.onboarding.request", side_effect=request),
+              patch("bot.providers.request", side_effect=request),
+              patch("bot.main.time.sleep", side_effect=AssertionError("onboarding interrupted the poll"))):
+            def start(terms="Учебное уведомление"):
+                return Bot(telegram, None, None, Path(directory), None,
+                           PilotProvisioner(google.session, "registry"), admitted={MEMBER}, terms=terms)
+
+            def run(bot, tick, *updates):
+                telegram.updates = list(updates)
+                with patch("bot.main.time.time", return_value=tick), self.assertRaises(KeyboardInterrupt):
+                    bot.run()
+
+            bot = start()
+            with closing(bot.db):
+                run(bot, 100, message(100, MEMBER, "/record Завтрак | До согласия | 80 г"))
+                self.assertFalse(bot.inbox_writes.waiting(MEMBER))
+                self.assertEqual(google.created, {})
+                self.assertIn(bot.terms_version, telegram.calls[-2][1]["text"])
+                run(bot, 110, message(101, MEMBER, f"/pilot_consent {bot.terms_version}"),
+                    message(102, MEMBER, "/record Завтрак | Первый | 80 г"),
+                    message(103, MEMBER, "/record Завтрак | Второй | 60 г"))
+                self.assertEqual(bot.get("offset"), 104)
+                self.assertEqual(attempts, 1)
+                self.assertEqual(google.created, {})
+                self.assertTrue(bot.inbox_writes.waiting(MEMBER))
+
+            bot = start()
+            with closing(bot.db):
+                run(bot, 240)
+                run(bot, 250)
+                run(bot, 260)
+                self.assertFalse(bot.inbox_writes.waiting(MEMBER))
+                self.assertEqual(bot.db.execute("SELECT COUNT(*) FROM deferred_onboarding").fetchone(), (0,))
+                sheet = bot.registered_sheet(MEMBER)
+                self.assertEqual([row[0] for row in sheet.read("'Входящие'!A2:H")],
+                                 [f"tg-{MEMBER}-102", f"tg-{MEMBER}-103"])
+                self.assertEqual([(row[2], row[4]) for row in sheet.read("'События'!A2:O")],
+                                 [("Первый", 80), ("Второй", 60)])
+                self.assertEqual(len(google.created), 2)
+                self.assertEqual(len(google.books["registry"][0].rows), 2)
+
+    def test_terms_change_and_withdrawal_pause_processing(self):
+        telegram = PilotTelegram()
+        with tempfile.TemporaryDirectory() as directory:
+            def start(notice):
+                return Bot(telegram, None, None, Path(directory), None, admitted={MEMBER}, terms=notice)
+
+            def dispatch(bot, *updates):
+                bot.receive(updates)
+                for update in updates:
+                    bot.process_update(update)
+
+            bot = start("Версия 1")
+            with closing(bot.db):
+                previous = f"/pilot_consent {bot.terms_version}"
+                dispatch(bot, message(1, MEMBER, previous), message(2, MEMBER, "/pilot_withdraw"))
+                bot.process_update(message(1, MEMBER, previous))
+                self.assertFalse(bot.has_private_access(MEMBER))
+                dispatch(bot, message(3, MEMBER, previous))
+                self.assertTrue(bot.has_private_access(MEMBER))
+
+            bot = start("Версия 2")
+            with closing(bot.db):
+                dispatch(bot, message(4, MEMBER, previous))
+                self.assertFalse(bot.has_private_access(MEMBER))
+                dispatch(bot, message(5, MEMBER, f"/pilot_consent {bot.terms_version}"))
+                self.assertTrue(bot.has_private_access(MEMBER))
+
     def test_late_inbox_append_survives_restart_without_blocking_other_profiles(self):
         google, telegram, owner_sheet = PilotGoogle(), PilotTelegram(), FakeGoogle()
         late = []

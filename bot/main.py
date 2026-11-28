@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 import datetime as dt
+from hashlib import sha256
 import json
 import logging
 import os
@@ -44,6 +45,9 @@ EVENT_EXISTS = "С этим входящим уже связаны записи 
 MODEL_UNAVAILABLE = "Входящее сохранено. ИИ сейчас недоступен. Для ручной записи ответь на исходное сообщение командой /record."
 MODEL_LIMIT = "Входящее сохранено. Дневной лимит ИИ исчерпан. Для ручной записи ответь на исходное сообщение командой /record."
 ADMISSION_SETTING = "TRACKER_PRIVATE_ADMISSION_IDS"
+TERMS_SETTING = "TRACKER_PRIVATE_TERMS"
+TERMS_REQUIRED = "Для участия сначала прочитай условия: /pilot_terms."
+ONBOARDING_WAIT = "Сообщение сохранено. Когда «БАЗА» подключится, продолжу с него."
 ADMISSION_REQUIRED = "Этот учебный поток закрыт. Вход доступен по согласованию с оператором."
 INBOX_WAIT = "Сообщение ожидает сверки с Google. Бот продолжит с исходного сообщения."
 ORIGINAL_REF = re.compile(r"tg-([0-9]+)-[0-9]+\.(ogg|jpg|png|webp)")
@@ -110,8 +114,10 @@ def attachment(message):
 
 class Bot:
     def __init__(self, telegram, sheets, model, directory, owner, provisioner=None, event_writes=None, inbox_writes=None,
-                 *, admitted=None):
+                 *, admitted=None, terms=None):
         self.admitted = admitted if admitted is None or owner is None else admitted | {owner}
+        self.terms = terms
+        self.terms_version = sha256(terms.encode()).hexdigest() if terms is not None else None
         self.telegram = telegram
         self.sheets = sheets
         self.model = model
@@ -129,6 +135,12 @@ class Bot:
         self.db = sqlite3.connect(directory / "bot.sqlite")
         self.db.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS receipts (id INTEGER PRIMARY KEY, received TEXT NOT NULL)")
+        if self.terms_version is not None:
+            self.db.execute("""
+                CREATE TABLE IF NOT EXISTS private_consents (
+                    user INTEGER PRIMARY KEY, version TEXT, received TEXT NOT NULL, update_id INTEGER NOT NULL
+                )
+            """)
         self.db.commit()
         self.event_writes = event_writes if event_writes is not None else EventWrites(self.db)
         self.inbox_writes = inbox_writes if inbox_writes is not None else InboxWrites(self.db)
@@ -157,7 +169,9 @@ class Bot:
                 if self.groups is not None:
                     self.groups.sync_group_faces()
                 if self.coaching is not None:
-                    self.coaching.send_due(dt.datetime.now(MOSCOW), admitted=self.admitted)
+                    self.coaching.send_due(dt.datetime.now(MOSCOW), admitted=(
+                        None if self.admitted is None else {user for user in self.admitted if self.has_private_access(user)}
+                    ))
                 if self.operations is not None:
                     try:
                         self.operations.run_daily(dt.datetime.now(MOSCOW))
@@ -215,6 +229,43 @@ class Bot:
         self.telegram.message(user, ADMISSION_REQUIRED)
         return False
 
+    def has_private_access(self, user):
+        if not self.admits(user):
+            return False
+        if self.terms_version is None or user == self.owner:
+            return True
+        return self.db.execute("SELECT 1 FROM private_consents WHERE user=? AND version=?",
+                               (user, self.terms_version)).fetchone() is not None
+
+    def show_terms(self, user):
+        self.telegram.message(user, f"{self.terms}\n\nПринять: /pilot_consent {self.terms_version}\n"
+                                    "Отозвать: /pilot_withdraw")
+
+    def handle_terms(self, user, text, update_id, received):
+        if self.terms_version is None or user == self.owner:
+            return False
+        if text == "/pilot_terms":
+            self.show_terms(user)
+            return True
+        if text == "/pilot_withdraw" or text == f"/pilot_consent {self.terms_version}":
+            version = None if text == "/pilot_withdraw" else self.terms_version
+            with self.db:
+                self.db.execute("""
+                    INSERT INTO private_consents(user, version, received, update_id) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user) DO UPDATE SET version=excluded.version, received=excluded.received,
+                        update_id=excluded.update_id
+                    WHERE (excluded.received, excluded.update_id) > (private_consents.received, private_consents.update_id)
+                """, (user, version, received.isoformat(), update_id))
+            if self.has_private_access(user):
+                self.telegram.message(user, "Условия приняты. Теперь можешь отправить первую запись.")
+            else:
+                self.telegram.message(user, "Обработка приостановлена. Условия доступны через /pilot_terms.")
+            return True
+        if text.partition(" ")[0] == "/pilot_consent" or not self.has_private_access(user):
+            self.show_terms(user)
+            return True
+        return False
+
     def process_update(self, update):
         update_id = update["update_id"]
         (saved_at,) = self.db.execute("SELECT received FROM receipts WHERE id = ?", (update_id,)).fetchone()
@@ -224,11 +275,16 @@ class Bot:
             if self.admitted is not None and not self.admits(query.get("from", {}).get("id")):
                 self.demo_checkout.acknowledge(query, ADMISSION_REQUIRED)
                 return
+            if self.terms_version is not None and not self.has_private_access(query.get("from", {}).get("id")):
+                self.demo_checkout.acknowledge(query, TERMS_REQUIRED)
+                return
             if self.demo_checkout.callback(query, received):
                 return
         message = update.get("message", {})
         if message.get("chat", {}).get("type") == "private":
             if not self.admit_private(message):
+                return
+            if self.handle_terms(message["from"]["id"], message.get("text", ""), update_id, received):
                 return
             if self.groups is None or not self.groups.private_history(message):
                 self.process_private(update_id, message, received)
@@ -242,7 +298,7 @@ class Bot:
 
     def process_private(self, update_id, message, received):
         user = message.get("from", {}).get("id")
-        if not self.admits(user) or message["chat"].get("id") != user:
+        if not self.has_private_access(user) or message["chat"].get("id") != user:
             return
         waiting = self.inbox_writes.waiting(user)
         if not waiting or message.get("text") in {"/status", "/pilot_health"}:
@@ -262,7 +318,11 @@ class Bot:
         now = int(time.time())
         for update_id, user, received, payload in self.inbox_writes.due(offset, now):
             self.inbox_writes.postpone(update_id, now + 120)
-            if self.registered_sheet(user) is None:
+            if not self.has_private_access(user):
+                continue
+            can_prepare_pair = (self.terms_version is not None and self.provisioner is not None
+                                and self.inbox_writes.needs_onboarding(update_id))
+            if self.registered_sheet(user) is None and not can_prepare_pair:
                 continue
             try:
                 self.dispatch(update_id, json.loads(payload), dt.datetime.fromisoformat(received), recovering=True)
@@ -275,7 +335,7 @@ class Bot:
             self.inbox_writes.finish(update_id)
 
     def registered_sheet(self, user):
-        if not self.admits(user):
+        if not self.has_private_access(user):
             return None
         if user == self.owner:
             return self.sheets
@@ -296,7 +356,7 @@ class Bot:
 
     def dispatch(self, update_id, message, received, *, recovering=False):
         user = message.get("from", {}).get("id")
-        if not self.admits(user) or message["chat"].get("id") != user:
+        if not self.has_private_access(user) or message["chat"].get("id") != user:
             return
         if self.voice_check is not None and self.voice_check.handle(user, message):
             return
@@ -311,6 +371,13 @@ class Bot:
         if user == self.owner:
             self.handle(update_id, message, received)
         elif self.provisioner is not None:
+            if self.terms_version is not None and not recovering and self.registered_sheet(user) is None:
+                self.inbox_writes.defer(update_id, user, message, received, onboarding=True)
+                try:
+                    self.telegram.message(user, ONBOARDING_WAIT)
+                except ProviderError:
+                    logging.warning("Подключение RX: уведомление об ожидании не доставлено")
+                return
             directory = self.directory / "participants" / str(user)
             directory.mkdir(parents=True, exist_ok=True)
             bot = Bot(self.telegram, None, self.model, directory, user,
@@ -319,6 +386,8 @@ class Bot:
             try:
                 try:
                     bot.sheets = self.provisioner.provision(bot.get("files"), lambda state: bot.put("files", state))
+                    if recovering:
+                        self.inbox_writes.finish_onboarding(update_id)
                 except ProviderError as error:
                     if recovering:
                         raise
@@ -666,6 +735,9 @@ def main():
         raise ProviderError("RX pilot", "incompatible worker modes")
     groups, face_tokens = report_config(os.environ)
     admitted = private_admission(os.environ)
+    terms = os.environ.get(TERMS_SETTING)
+    if (admitted is None) != (terms is None) or (terms is not None and (not terms.strip() or len(terms) > 3000)):
+        raise ProviderError("RX pilot", "private admission requires a non-empty terms notice")
     if admitted is not None and groups:
         raise ProviderError("RX pilot", "private admission mode requires a private-only worker")
     google_settings = legacy_google_settings(os.environ)
@@ -715,7 +787,8 @@ def main():
             account = telegram.api("getMe", {})
         logging.info("Telegram @%s: %s", account["username"],
                      "режим без БАЗЫ" if telegram_only else "готов принимать личные сообщения")
-        bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner, admitted=admitted)
+        bot = Bot(telegram, sheets, model, data, int(owner) if owner else None, provisioner,
+                  admitted=admitted, terms=terms)
         if "TRACKER_AI_DAILY_CALLS" in os.environ:
             raw_limit = os.environ["TRACKER_AI_DAILY_CALLS"]
             limit = int(raw_limit) if re.fullmatch(r"[0-9]{1,7}", raw_limit) else 0
